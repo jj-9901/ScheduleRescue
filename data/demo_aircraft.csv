@@ -1,0 +1,4 @@
+aircraft_id,initial_location,available_from,cost_per_hour,aircraft_type
+A001,DEL,2026-11-10 06:00,500,A
+A002,DEL,2026-11-10 06:00,450,A
+A003,BOM,2026-11-10 06:00,550,A
