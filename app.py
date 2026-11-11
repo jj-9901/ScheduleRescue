@@ -6,7 +6,7 @@ import plotly.express as px
 import streamlit as st
 from src.scheduler import solve_schedule
 from src.validation import prepare_data
-from src.metrics import connection_metrics, compare_schedules
+from src.metrics import connection_metrics, compare_schedules, settings_match
 from src.visualizations import resource_timeline
 
 st.set_page_config(page_title="Schedule Rescue", page_icon="✈️", layout="wide")
@@ -23,7 +23,7 @@ def csv_download(label, df, filename):
     st.download_button(label,df.to_csv(index=False),filename,mime="text/csv")
 
 def clear_optimization_state():
-    for key in ("initial_results","recovery_results","input_snapshot","model_settings","scenario","disrupted_flights"):
+    for key in ("initial_results","recovery_results","input_snapshot","model_settings","scenario","disrupted_flights","comparison_results"):
         st.session_state.pop(key,None)
 
 st.title("✈️ Schedule Rescue")
@@ -87,7 +87,10 @@ with tabs[2]:
     turnaround=st.number_input("Minimum aircraft turnaround (minutes)",0,300,45,5,key="turnaround")
     buffer=st.number_input("Extra buffer for Buffered (minutes)",0,180,30,5,key="buffer")
     target=st.number_input("Target slack for Flexible (minutes)",int(turnaround),360,max(90,int(turnaround)),5,key="target")
-    chosen=st.multiselect("Strategies to solve",["normal","buffered","flexible"],["normal","buffered","flexible"],format_func=str.title)
+    chosen=st.multiselect("Strategies to solve",["normal","buffered","flexible"],["normal","buffered","flexible"],format_func=str.title,key="chosen_strategies")
+    active_settings={"turnaround":int(turnaround),"buffer":int(buffer),"target":int(target),"strategies":list(chosen)}
+    if st.session_state.get("initial_results") and not settings_match(st.session_state.get("model_settings"), active_settings):
+        clear_optimization_state()
     if st.button("Solve initial schedule(s)",type="primary"):
         if "data" not in st.session_state: st.error("Provide valid data in Airline data first.")
         else:
@@ -95,17 +98,19 @@ with tabs[2]:
             for strategy in chosen:
                 with st.spinner(f"Solving {strategy} MILP..."):
                     results[strategy]=solve_schedule(f,a,c,turnaround_minutes=turnaround,strategy=strategy,buffer_minutes=buffer,flexibility_target_minutes=target)
+                results[strategy]["solve_context"]={"flights":f.copy(),"aircraft":a.copy(),"crew":c.copy(),
+                    "strategy_settings":dict(active_settings),"strategy":strategy}
             st.session_state["initial_results"]=results
             st.session_state["input_snapshot"]=(f.copy(),a.copy(),c.copy())
-            st.session_state["model_settings"]={"turnaround":turnaround,"buffer":buffer,"target":target}
+            st.session_state["model_settings"]=active_settings
             st.session_state.pop("recovery_results",None)
     for strategy,result in st.session_state.get("initial_results",{}).items():
         st.markdown(f"#### {strategy.title()} — {result['status']}")
         if result["status"]=="Optimal":
             st.dataframe(result["schedule"],use_container_width=True)
             m=connection_metrics(result["schedule"],int(turnaround))
-            cols=st.columns(4); cols[0].metric("Operating cost",f"{result['components']['scheduled_operating_cost']:,.2f}"); cols[1].metric("Aircraft used",result["schedule"].assigned_aircraft.nunique()); cols[2].metric("Crew used",len(set(";".join(result["schedule"].assigned_crew).split(";")))); cols[3].metric("Average connection gap",f"{m['average_connection_slack_minutes'] or 0:.0f} min")
-            st.caption(f"Minimum connection gap: {m['minimum_connection_slack_minutes'] if m['minimum_connection_slack_minutes'] is not None else '—'} min · Tight connections (< minimum turnaround + 30 min): {m['tight_connections']}")
+            cols=st.columns(4); cols[0].metric("Operating cost",f"{result['components']['scheduled_operating_cost']:,.2f}"); cols[1].metric("Aircraft used",result["schedule"].assigned_aircraft.nunique()); cols[2].metric("Crew used",len(set(";".join(result["schedule"].assigned_crew).split(";")))); cols[3].metric("Average connection slack",f"{m['average_connection_slack_minutes'] or 0:.0f} min")
+            st.caption(f"Average connection gap: {m['average_connection_gap_minutes'] if m['average_connection_gap_minutes'] is not None else '—'} min · Minimum gap: {m['minimum_connection_gap_minutes'] if m['minimum_connection_gap_minutes'] is not None else '—'} min · Minimum slack: {m['minimum_connection_slack_minutes'] if m['minimum_connection_slack_minutes'] is not None else '—'} min")
             timeline_cols=st.columns(2)
             with timeline_cols[0]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_aircraft",f"{strategy.title()} aircraft timeline"),use_container_width=True)
             with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} crew timeline"),use_container_width=True)
@@ -126,6 +131,9 @@ with tabs[3]:
         cancel_ids=st.multiselect("Cancel flights",flight_ids,key="cancel_ids")
         unavailable_a=st.multiselect("Unavailable aircraft",aircraft_ids,key="unavailable_a")
         unavailable_c=st.multiselect("Unavailable crew",crew_ids,key="unavailable_c")
+        current_scenario={"delay_ids":list(delay_ids),"delay_minutes":int(delay_minutes),"cancel_ids":list(cancel_ids),"unavailable_a":list(unavailable_a),"unavailable_c":list(unavailable_c)}
+        if st.session_state.get("recovery_results") and st.session_state.get("scenario") != current_scenario:
+            st.session_state.pop("recovery_results",None); st.session_state.pop("comparison_results",None)
         st.markdown("**Selected scenario**")
         st.write({"delays":{i:int(delay_minutes) for i in delay_ids},"cancelled_flights":cancel_ids,"unavailable_aircraft":unavailable_a,"unavailable_crew":unavailable_c})
         if st.button("Recover every solved strategy",type="primary"):
@@ -141,6 +149,9 @@ with tabs[3]:
                 oc={row.flight_id:[x for x in str(row.assigned_crew).split(";") if x] for row in base["schedule"].itertuples()}
                 with st.spinner(f"Recovering {strategy} schedule..."):
                     recovery[strategy]=solve_schedule(modified,a,c,turnaround_minutes=settings["turnaround"],unavailable_aircraft=unavailable_a,unavailable_crew=unavailable_c,cancelled_flights=cancel_ids,original_assignment=oa,original_crew_assignment=oc,allow_cancellation=True,strategy="normal")
+                recovery[strategy]["solve_context"]={"flights":modified.copy(),"aircraft":a.copy(),"crew":c.copy(),
+                    "initial_strategy":strategy,"initial_settings":dict(settings),"disruptions":dict(current_scenario),
+                    "recovery_parameters":dict(recovery[strategy].get("solve_parameters",{}))}
                 if recovery[strategy]["status"] == "Optimal":
                     old_aircraft=dict(zip(base["schedule"].flight_id,base["schedule"].assigned_aircraft))
                     old_crew={row.flight_id:set(str(row.assigned_crew).split(";")) for row in base["schedule"].itertuples()}
@@ -156,15 +167,23 @@ with tabs[3]:
                         recovery[strategy]["schedule"].loc[recovery[strategy]["schedule"].flight_id==row.flight_id,"recovery_status"]=tag
             st.session_state["recovery_results"]=recovery
             st.session_state["disrupted_flights"]=modified
-            st.session_state["scenario"]={"delay_ids":delay_ids,"delay_minutes":int(delay_minutes),"cancel_ids":cancel_ids,"unavailable_a":unavailable_a,"unavailable_c":unavailable_c}
+            st.session_state["scenario"]=current_scenario
+            comparison={}
+            for strategy,result in recovery.items():
+                if result.get("status")=="Optimal":
+                    comparison[strategy]=compare_schedules(initial[strategy]["schedule"],result["schedule"],initial[strategy],result,
+                        externally_imposed_delays={fid:int(delay_minutes) for fid in delay_ids},expected_flight_ids=flight_ids,
+                        turnaround_minutes=settings["turnaround"])
+                else:
+                    comparison[strategy]={"solver_status":result.get("status","Unknown")}
+            st.session_state["comparison_results"]=comparison
     for strategy,result in st.session_state.get("recovery_results",{}).items():
         st.markdown(f"#### {strategy.title()} recovery — {result['status']}")
         if result["status"]=="Optimal":
             base=initial[strategy]; st.dataframe(result["schedule"],use_container_width=True)
-            metrics=compare_schedules(base["schedule"],result["schedule"],base,result)
-            cols=st.columns(4); cols[0].metric("Cancelled flights",metrics["cancelled_flights"]); cols[1].metric("Aircraft reassigned",metrics["reassigned_flights"]); cols[2].metric("Crew changed",metrics["crew_changed_flights"]); cols[3].metric("Final operating cost",f"{metrics['recovery_operating_cost']:,.2f}")
-            st.caption(f"Recovery cost change {metrics['recovery_cost_increase']:,.2f}; penalties {result['components']['recovery_penalties']:,.2f}. External delays: {len(st.session_state['scenario']['delay_ids'])}; recovery does not add further delay.")
-            metrics["delayed_flights"]=len(st.session_state["scenario"]["delay_ids"])
+            metrics=st.session_state.get("comparison_results",{}).get(strategy,{})
+            cols=st.columns(4); cols[0].metric("Cancelled flights",metrics["cancelled_flights"]); cols[1].metric("Aircraft changed",metrics["aircraft_changed_flights"]); cols[2].metric("Crew changed",metrics["crew_changed_flights"]); cols[3].metric("Final operating cost",f"{metrics['recovery_operating_cost']:,.2f}")
+            st.caption(f"Unique flights with assignment changes: {metrics['unique_changed_flights']}. Externally delayed: {metrics['externally_imposed_delay_flights']}; operated delayed: {metrics['operated_externally_delayed_flights']}; cancelled after delay: {metrics['cancelled_externally_delayed_flights']}; recovery-added delay: {metrics['recovery_added_delay_minutes']} minutes.")
             timeline_cols=st.columns(2)
             with timeline_cols[0]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_aircraft",f"{strategy.title()} recovered aircraft",base["schedule"]),use_container_width=True)
             with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} recovered crew",base["schedule"]),use_container_width=True)
@@ -177,18 +196,15 @@ with tabs[4]:
     rows=[]
     for strategy,result in recs.items():
         base=bases[strategy]
-        if result["status"]=="Optimal": rows.append({"Strategy":strategy.title(),**compare_schedules(base["schedule"],result["schedule"],base,result)})
+        if result["status"]=="Optimal": rows.append({"Strategy":strategy.title(),**st.session_state.get("comparison_results",{}).get(strategy,{})})
         else: rows.append({"Strategy":strategy.title(),"solver_status":result["status"]})
     if rows:
         table=pd.DataFrame(rows); st.dataframe(table,use_container_width=True); csv_download("Download comparison CSV",table,"strategy_comparison.csv")
         valid=table[table.solver_status=="Optimal"]
         if not valid.empty:
-            if "scenario" in st.session_state:
-                valid["delayed_flights"] = len(st.session_state["scenario"]["delay_ids"])
-                valid["average_external_delay_minutes"] = st.session_state["scenario"]["delay_minutes"] if st.session_state["scenario"]["delay_ids"] else 0
-            for metric,title in [("initial_operating_cost","Initial operating cost"),("recovery_operating_cost","Recovery operating cost"),("total_operational_cost","Total operational cost"),("cancelled_flights","Cancelled flights"),("delayed_flights","Externally delayed flights"),("reassigned_flights","Aircraft reassigned"),("crew_changed_flights","Flights with crew changes")]:
+            for metric,title in [("initial_operating_cost","Initial operating cost"),("recovery_operating_cost","Recovered operating cost"),("total_modeled_recovery_cost","Total modeled recovery cost"),("cancelled_flights","Cancelled flights"),("operated_externally_delayed_flights","Operated externally delayed flights"),("aircraft_changed_flights","Aircraft assignment changes"),("crew_changed_flights","Crew assignment changes"),("unique_changed_flights","Unique flights changed")]:
                 st.plotly_chart(px.bar(valid,x="Strategy",y=metric,title=title),use_container_width=True)
-            st.caption("Total operational cost = recovered schedule operating cost + cancellation/reassignment penalties. Initial cost is shown for context and is not added again, avoiding double counting. No extra recovery delay is optimized.")
+            st.caption("Total modeled recovery cost = recovered operating cost + cancellation, aircraft change, crew change, and other recovery penalties. Strategy preference scores are separate. Initial cost is shown for comparison only.")
     else: st.info("Run recovery on one or more schedules to compare actual solver results.")
 
 with tabs[5]:

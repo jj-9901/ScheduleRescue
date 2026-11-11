@@ -2,6 +2,9 @@ import unittest
 import pandas as pd
 from src.scheduler import solve_schedule
 from src.validation import prepare_data
+from src.metrics import compare_schedules, connection_metrics, settings_match
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 def data():
@@ -117,6 +120,74 @@ class ScheduleModelTests(unittest.TestCase):
         f,a,c=data(); a=a.iloc[:1].copy()
         result=solve_schedule(f,a,c,allow_cancellation=False)
         self.assertNotEqual(result["status"],"Optimal")
+
+    def test_connection_gap_and_slack_are_distinct(self):
+        schedule=pd.DataFrame([
+            {"flight_id":"X","origin":"AAA","destination":"BBB","departure":pd.Timestamp("2026-01-01 08:00"),"arrival":pd.Timestamp("2026-01-01 09:00"),"assigned_aircraft":"CHECK","assigned_crew":"C1","status":"Scheduled"},
+            {"flight_id":"Y","origin":"BBB","destination":"CCC","departure":pd.Timestamp("2026-01-01 10:00"),"arrival":pd.Timestamp("2026-01-01 11:00"),"assigned_aircraft":"CHECK","assigned_crew":"C1","status":"Scheduled"}])
+        metrics=connection_metrics(schedule,45)
+        self.assertEqual(metrics["average_connection_gap_minutes"],60)
+        self.assertEqual(metrics["average_connection_slack_minutes"],15)
+
+    def test_external_delay_categories_and_cancelled_delay(self):
+        f,a,c=data(); initial=self.solve(f,a,c)
+        base=initial["schedule"].copy()
+        recovered=base.copy()
+        recovered.loc[recovered.flight_id=="F1","status"]="Cancelled"
+        recovered.loc[recovered.flight_id=="F1","assigned_aircraft"]=None
+        recovered.loc[recovered.flight_id=="F1","assigned_crew"]=""
+        result={"status":"Optimal","components":initial["components"]}
+        metrics=compare_schedules(base,recovered,initial,result,externally_imposed_delays={"F1":30,"F2":30})
+        self.assertEqual(metrics["externally_imposed_delay_flights"],2)
+        self.assertEqual(metrics["operated_externally_delayed_flights"],1)
+        self.assertEqual(metrics["cancelled_externally_delayed_flights"],1)
+        self.assertEqual(metrics["recovery_added_delay_minutes"],0)
+
+    def test_cost_identity_unique_changes_and_uncovered_flights(self):
+        f,a,c=data(); initial=self.solve(f,a,c)
+        recovered=initial["schedule"].copy()
+        recovered.loc[recovered.flight_id=="F1","assigned_aircraft"]="A-NEW"
+        recovered.loc[recovered.flight_id=="F1","assigned_crew"]="C-NEW"
+        comps={"scheduled_operating_cost":70,"cancellation_penalty":3,
+               "aircraft_reassignment_penalty":5,"crew_reassignment_penalty":7,
+               "other_recovery_penalties":2}
+        solved={"status":"Optimal","components":comps}
+        metrics=compare_schedules(initial["schedule"],recovered,initial,solved)
+        self.assertEqual(metrics["aircraft_changed_flights"],1)
+        self.assertEqual(metrics["crew_changed_flights"],1)
+        self.assertEqual(metrics["unique_changed_flights"],1)
+        self.assertEqual(metrics["recovery_penalties"],17)
+        self.assertEqual(metrics["total_modeled_recovery_cost"],87)
+        partial=recovered[recovered.flight_id!="F1"]
+        incomplete=compare_schedules(initial["schedule"],partial,initial,solved,expected_flight_ids=["F1","F2","F3"])
+        self.assertEqual(incomplete["unexpectedly_uncovered_flights"],1)
+
+    def test_stale_result_settings_are_rejected(self):
+        used={"turnaround":45,"buffer":30,"target":90,"strategies":["normal"]}
+        self.assertTrue(settings_match(used,dict(used)))
+        self.assertFalse(settings_match(used,{**used,"turnaround":60}))
+
+    def test_failed_solve_cannot_produce_schedule_metrics(self):
+        with self.assertRaisesRegex(ValueError,"failed solve"):
+            compare_schedules(pd.DataFrame(),pd.DataFrame(),{}, {"status":"Infeasible"})
+
+    def test_comparison_metrics_round_trip_to_csv(self):
+        f,a,c=data(); initial=self.solve(f,a,c)
+        metrics=compare_schedules(initial["schedule"],initial["schedule"],initial,initial)
+        table=pd.DataFrame([{"Strategy":"Normal",**metrics}])
+        restored=pd.read_csv(pd.io.common.StringIO(table.to_csv(index=False)))
+        self.assertEqual(list(table.columns),list(restored.columns))
+        self.assertEqual(table.iloc[0]["total_modeled_recovery_cost"],restored.iloc[0]["total_modeled_recovery_cost"])
+
+    def test_experiment_runner_uses_all_strategies_for_same_scenarios(self):
+        from experiments.run_experiments import SCENARIOS, STRATEGIES, run_experiments
+        with TemporaryDirectory() as tmp:
+            result,path=run_experiments(Path(tmp)/"out.csv")
+            self.assertEqual(len(result),len(SCENARIOS)*len(STRATEGIES))
+            self.assertEqual(set(result.strategy),set(STRATEGIES))
+            for scenario_id,group in result.groupby("scenario_id"):
+                self.assertEqual(set(group.strategy),set(STRATEGIES),scenario_id)
+            self.assertTrue(Path(path).exists())
 
 
 if __name__=="__main__": unittest.main()

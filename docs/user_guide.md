@@ -27,4 +27,12 @@ The app runs a separate recovery MILP for every successful initial plan. A fligh
 - **Solver status:** only Optimal is presented as a feasible optimized schedule; other statuses need investigation.
 - **Total operational cost:** final operating cost plus modeled recovery penalties, with initial schedule cost not added twice.
 
+- **Connection gap:** next departure minus previous arrival on the same aircraft route. **Connection slack:** connection gap minus required turnaround.
+- **Externally imposed delays:** the user selected delay count and minutes. **Operated delayed flights** exclude delayed flights that were cancelled; those appear separately as **cancelled after external delay**. Recovery-added delay is zero because the model does not retime flights.
+- **Unique changed flights:** the union of flights with aircraft or crew assignment changes; the two change counts are also reported separately.
+- **Unexpectedly uncovered flights:** expected flight IDs absent from the accepted schedule. An incomplete result is not treated as a successful solver schedule.
+- **Recovery cost:** recovered operating cost plus cancellation, aircraft change, crew change, and other recovery penalties. The Flexible strategy score is shown separately and is not an operating cost.
+
+Changing the input data, strategy selection, turnaround, buffer, or target clears results generated under the earlier settings. Changing a disruption clears its recovery and comparison outputs. Each solve also retains its model settings for reproducibility.
+
 All schedule and comparison tables can be downloaded as CSV.

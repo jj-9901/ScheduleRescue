@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 import pandas as pd
 import pulp
 from src.validation import prepare_data
@@ -162,11 +163,14 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
             tight_penalty += max(0, flexibility_target_minutes-slack)*flexibility_penalty_per_minute*v
     m += op_cost + crew_cost + cancel_cost + aircraft_change + crew_change + tight_penalty
     solver = pulp.PULP_CBC_CMD(msg=False, timeLimit=time_limit)
+    solve_started = time.perf_counter()
     m.solve(solver)
+    solver_runtime = time.perf_counter() - solve_started
     status = pulp.LpStatus[m.status]
     if status != "Optimal":
         return {"status": status, "schedule": pd.DataFrame(), "objective": None,
-                "strategy": strategy, "effective_turnaround": op_turn, "components": {}, "solver_message": status}
+                "strategy": strategy, "effective_turnaround": op_turn, "components": {}, "solver_message": status,
+                "solver_runtime_seconds": solver_runtime}
     rows=[]
     for i in F:
         ass=next((j for j in A if pulp.value(x[i,j]) > .5), None)
@@ -174,5 +178,28 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
         rows.append({"flight_id":i,"origin":fd[i]["origin"],"destination":fd[i]["destination"],"departure":fd[i]["departure"],"arrival":fd[i]["arrival"],"assigned_aircraft":ass,"assigned_crew":";".join(crew_ids),"status":"Cancelled" if pulp.value(z[i])>.5 else "Scheduled"})
     values = {"aircraft_operating_cost":float(pulp.value(op_cost) or 0),"crew_operating_cost":float(pulp.value(crew_cost) or 0),"cancellation_penalty":float(pulp.value(cancel_cost) or 0),"aircraft_reassignment_penalty":float(pulp.value(aircraft_change) or 0),"crew_reassignment_penalty":float(pulp.value(crew_change) or 0),"flexibility_penalty":float(pulp.value(tight_penalty) or 0)}
     values["scheduled_operating_cost"] = values["aircraft_operating_cost"]+values["crew_operating_cost"]
-    values["recovery_penalties"] = sum(values[k] for k in ("cancellation_penalty","aircraft_reassignment_penalty","crew_reassignment_penalty"))
-    return {"status":status,"schedule":pd.DataFrame(rows),"objective":float(pulp.value(m.objective)),"strategy":strategy,"effective_turnaround":op_turn,"components":values,"solver_message":status}
+    values["other_recovery_penalties"] = 0.0
+    values["recovery_penalties"] = sum(values[k] for k in ("cancellation_penalty","aircraft_reassignment_penalty","crew_reassignment_penalty","other_recovery_penalties"))
+    schedule = pd.DataFrame(rows)
+    # Coverage is checked at the solver boundary so later metrics cannot legitimize
+    # a malformed or partial result.
+    covered = set(schedule.flight_id)
+    invalid_rows = schedule[(schedule.status != "Cancelled") & schedule.assigned_aircraft.isna()]
+    invalid_crew = schedule.apply(lambda row: row.status != "Cancelled" and
+        len([item for item in str(row.assigned_crew).split(";") if item]) !=
+        int(fd[row.flight_id]["required_crew_count"]), axis=1)
+    if len(schedule) != len(F) or covered != set(F) or not invalid_rows.empty or invalid_crew.any():
+        return {"status":"InvalidSolution", "schedule":pd.DataFrame(), "objective":None,
+                "strategy":strategy, "effective_turnaround":op_turn, "components":{},
+                "solver_message":"Solver result did not cover every input flight.",
+                "solver_runtime_seconds":solver_runtime}
+    strategy_score = values["flexibility_penalty"] if strategy == "flexible" else 0.0
+    return {"status":status,"schedule":schedule,"objective":float(pulp.value(m.objective)),"strategy":strategy,"effective_turnaround":op_turn,"components":values,"strategy_score":strategy_score,"solver_message":status,"solver_runtime_seconds":solver_runtime,
+            "solve_parameters":{"turnaround_minutes":turnaround_minutes,"crew_rest_minutes":crew_rest_minutes,
+                "strategy":strategy,"buffer_minutes":buffer_minutes,"flexibility_target_minutes":flexibility_target_minutes,
+                "flexibility_penalty_per_minute":flexibility_penalty_per_minute,"cancellation_penalty":cancellation_penalty,
+                "aircraft_change_penalty":AIRCRAFT_CHANGE_PENALTY,"crew_change_penalty":CREW_CHANGE_PENALTY,
+                "unavailable_aircraft":sorted(unavailable_aircraft),"unavailable_crew":sorted(unavailable_crew),
+                "unavailable_periods":periods,"cancelled_flights":sorted(cancelled_flights),
+                "original_assignment":original_assignment,"original_crew_assignment":original_crew_assignment,
+                "allow_cancellation":allow_cancellation}}

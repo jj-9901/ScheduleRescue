@@ -56,6 +56,21 @@ The initial operating cost is the sum of block hours times aircraft hourly cost 
 
 Normal minimizes operating cost. Buffered applies additional aircraft turnaround to the initial solve only. Flexible adds a weighted penalty to every selected aircraft connection for slack shortfall below the user target, where slack is the gap between flights minus the minimum turnaround. Both strategies retain actual operating costs as a separate result. Recovery for every strategy uses the same actual turnaround and recovery objective.
 
+Connection **gap** is the minutes between one flight's arrival and the next departure. Connection **slack** is gap minus required turnaround. External delay metrics distinguish selected delayed flights and total imposed minutes from delayed flights that operated and delayed flights that were cancelled. The model has no recovery retiming decision, so recovery-added delay is zero. Assignment changes report aircraft and crew separately plus the union of unique affected flights.
+
+Recovery cost is recovered operating cost plus cancellation, aircraft reassignment, crew reassignment, and any other recovery penalties. Initial operating cost is shown only as a reference; its full value is not added again. Flexible strategy's connection shortfall score is an optimization preference and is reported separately from operating cost and recovery penalties.
+
+## Reproducible experiment
+
+Run from the repository root:
+
+```bash
+python experiments/run_experiments.py
+python experiments/analyze_results.py
+```
+
+The runner saves every one of nine scenarios for all three strategies in `experiments/results/experiment_results.csv`, including failed solves. Recovery uses the same Normal objective, penalties, actual turnaround, and resource disruption rules for every initial strategy. The analysis writes strategy summaries, per-scenario cost differences, failed-solve rows, and interactive HTML charts under `experiments/results/analysis/`. CBC can choose different equal-cost optima across versions or environments; recorded dependency and platform versions support comparison, but exact assignment tie-breaking is not guaranteed.
+
 The full formulation is in [docs/mathematical_model.md](docs/mathematical_model.md). Data definitions and simplifying assumptions are in [docs/assumptions.md](docs/assumptions.md); instructions are in [docs/user_guide.md](docs/user_guide.md); experiment design is in [docs/methodology.md](docs/methodology.md).
 
 ## Test
