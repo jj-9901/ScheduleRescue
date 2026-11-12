@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import math
 
 FLIGHT_COLUMNS = ["flight_id", "origin", "destination", "departure", "arrival"]
 AIRCRAFT_COLUMNS = ["aircraft_id", "initial_location", "available_from", "cost_per_hour"]
@@ -25,11 +26,15 @@ def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFra
     _required(f, FLIGHT_COLUMNS, "Flights")
     _required(a, AIRCRAFT_COLUMNS, "Aircraft")
     for col in ("flight_id", "origin", "destination"):
-        f[col] = f[col].astype(str).str.strip().str.upper()
+        f[col] = f[col].astype(str).str.strip()
+        if col != "flight_id":
+            f[col] = f[col].str.upper()
         if (f[col] == "").any():
             raise ValueError(f"Flights column {col} cannot be blank.")
     for col in ("aircraft_id", "initial_location"):
-        a[col] = a[col].astype(str).str.strip().str.upper()
+        a[col] = a[col].astype(str).str.strip()
+        if col == "initial_location":
+            a[col] = a[col].str.upper()
         if (a[col] == "").any():
             raise ValueError(f"Aircraft column {col} cannot be blank.")
     for df, key, label in ((f, "flight_id", "Flight"), (a, "aircraft_id", "Aircraft")):
@@ -44,7 +49,21 @@ def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFra
     if "priority" not in f: f["priority"] = 1
     if "aircraft_type" not in a: a["aircraft_type"] = "ANY"
     f["aircraft_type_required"] = f["aircraft_type_required"].fillna("ANY").astype(str).str.strip().str.upper()
-    f["required_crew_count"] = pd.to_numeric(f["required_crew_count"], errors="raise").fillna(1).astype(int)
+    # Blank values retain the documented default of one. Validate every other
+    # value before conversion so a fractional crew requirement is never truncated.
+    raw_crew_count = f["required_crew_count"]
+    parsed_crew_count = pd.to_numeric(raw_crew_count, errors="coerce")
+    blank_crew_count = raw_crew_count.map(lambda value: isinstance(value, str) and not value.strip())
+    blank_crew_count |= raw_crew_count.map(lambda value: value is None or value is pd.NA)
+    parsed_crew_count = parsed_crew_count.mask(blank_crew_count, 1)
+    valid_crew_count = parsed_crew_count.map(
+        lambda value: pd.notna(value) and math.isfinite(float(value)) and float(value).is_integer() and float(value) > 0
+    )
+    if not valid_crew_count.all():
+        rows = f.index[~valid_crew_count]
+        details = [f"{f.loc[row, 'flight_id']!r} (required_crew_count={raw_crew_count.loc[row]!r})" for row in rows]
+        raise ValueError("Flights has invalid required_crew_count for flight(s): " + ", ".join(details) + ". Values must be finite positive integers.")
+    f["required_crew_count"] = parsed_crew_count.astype(int)
     f["priority"] = pd.to_numeric(f["priority"], errors="raise").fillna(1).astype(float)
     a["aircraft_type"] = a["aircraft_type"].fillna("ANY").astype(str).str.strip().str.upper()
     a["cost_per_hour"] = pd.to_numeric(a["cost_per_hour"], errors="raise")
@@ -61,7 +80,7 @@ def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFra
         if "cost_per_hour" not in c.columns:
             c["cost_per_hour"] = 0.0
         _required(c, CREW_COLUMNS, "Crew")
-        c["crew_id"] = c["crew_id"].astype(str).str.strip().str.upper()
+        c["crew_id"] = c["crew_id"].astype(str).str.strip()
         c["initial_location"] = c["initial_location"].astype(str).str.strip().str.upper()
         c["available_from"] = pd.to_datetime(c["available_from"], errors="raise")
         c["max_work_hours"] = pd.to_numeric(c["max_work_hours"], errors="raise")

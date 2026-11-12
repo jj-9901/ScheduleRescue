@@ -13,7 +13,11 @@ def analyze(path=None):
     data = pd.read_csv(source)
     output = source.parent / "analysis"
     output.mkdir(parents=True, exist_ok=True)
-    successful = data[data.solver_status == "Optimal"].copy()
+    status_column = data.get("result_classification", data.solver_status).replace(
+        {"Optimal": "optimal", "FeasibleLimit": "feasible_limit"})
+    initial_status = data.get("initial_result_classification", pd.Series("optimal", index=data.index)).replace(
+        {"Optimal": "optimal", "FeasibleLimit": "feasible_limit"})
+    successful = data[(status_column == "optimal") & (initial_status == "optimal")].copy()
     summaries = successful.groupby("strategy", as_index=False).agg(
         scenario_count=("scenario_id", "count"),
         initial_operating_cost=("initial_operating_cost", "mean"),
@@ -39,7 +43,11 @@ def analyze(path=None):
         differences[f"{strategy}_total_recovery_cost_delta"] = total[strategy] - total.min(axis=1)
     differences.to_csv(output / "scenario_cost_differences.csv")
     successful.to_csv(output / "successful_scenario_metrics.csv", index=False)
-    data[data.solver_status != "Optimal"].to_csv(output / "failed_solves.csv", index=False)
+    any_feasible_limit = (status_column == "feasible_limit") | (initial_status == "feasible_limit")
+    data[any_feasible_limit].to_csv(output / "feasible_limit_solves.csv", index=False)
+    failed = ~((status_column.isin(["optimal", "feasible_limit"])) &
+               (initial_status.isin(["optimal", "feasible_limit"])))
+    data[failed].to_csv(output / "failed_solves.csv", index=False)
     charts = [
         ("initial_vs_recovered_cost.html", ["initial_operating_cost", "recovered_operating_cost"], "Operating costs by scenario"),
         ("cancellations.html", ["cancelled_flights"], "Cancelled flights"),
@@ -69,7 +77,8 @@ def analyze(path=None):
         "Use `scenario_cost_differences.csv` to compare both operating-cost and total-recovery-cost differences within each scenario. Strategy-specific initial preference scores are not included in these monetary comparisons."
     ]
     (output / "interpretation.md").write_text("\n".join(explanation) + "\n", encoding="utf-8")
-    print(f"Analyzed {len(data)} rows ({len(successful)} optimal, {len(data)-len(successful)} failed or not run).")
+    feasible_limit_count = int(any_feasible_limit.sum())
+    print(f"Analyzed {len(data)} rows ({len(successful)} proven optimal, {feasible_limit_count} feasible at limit, {len(data)-len(successful)-feasible_limit_count} failed or not run).")
     print(summaries.to_string(index=False))
     print(f"Analysis files: {output}")
     print("Interpretation written to:", output / "interpretation.md")

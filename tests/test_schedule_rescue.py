@@ -1,6 +1,9 @@
 import unittest
 import pandas as pd
-from src.scheduler import solve_schedule
+from io import StringIO
+from unittest.mock import patch
+import pulp
+from src.scheduler import solve_schedule, _classify_solver_result, _cbc_metadata, _schedule_passes_coverage
 from src.validation import prepare_data
 from src.metrics import compare_schedules, connection_metrics, settings_match
 from pathlib import Path
@@ -188,6 +191,133 @@ class ScheduleModelTests(unittest.TestCase):
             for scenario_id,group in result.groupby("scenario_id"):
                 self.assertEqual(set(group.strategy),set(STRATEGIES),scenario_id)
             self.assertTrue(Path(path).exists())
+
+    def test_solver_result_classification_uses_solution_status(self):
+        class Model:
+            status = pulp.LpStatusOptimal
+            sol_status = pulp.LpSolutionOptimal
+        self.assertEqual(_classify_solver_result(Model()), "optimal")
+        Model.sol_status = pulp.LpSolutionIntegerFeasible
+        self.assertEqual(_classify_solver_result(Model()), "feasible_limit")
+        Model.status = pulp.LpStatusInfeasible
+        Model.sol_status = pulp.LpSolutionInfeasible
+        self.assertEqual(_classify_solver_result(Model()), "infeasible")
+        Model.status = pulp.LpStatusNotSolved
+        Model.sol_status = pulp.LpSolutionNoSolutionFound
+        self.assertEqual(_classify_solver_result(Model()), "failed")
+
+    def test_feasible_incumbent_must_pass_independent_coverage_checks(self):
+        f,a,c=data(); normalized,_,_=prepare_data(f,a,c)
+        flight_data=normalized.set_index("flight_id").to_dict("index")
+        schedule=pd.DataFrame([{"flight_id":"F1","assigned_aircraft":"A1","assigned_crew":"C1","status":"Scheduled"}])
+        self.assertFalse(_schedule_passes_coverage(schedule, normalized.flight_id.tolist(), flight_data))
+        schedule=pd.DataFrame([{"flight_id":fid,"assigned_aircraft":"A1","assigned_crew":"","status":"Scheduled"} for fid in normalized.flight_id])
+        self.assertFalse(_schedule_passes_coverage(schedule, normalized.flight_id.tolist(), flight_data))
+
+    def test_cbc_stopped_incumbent_parser_and_metadata(self):
+        # This reproduces PuLP 2.9.0 CBC's broad Optimal + IntegerFeasible mapping.
+        class Model:
+            status = pulp.LpStatusOptimal
+            sol_status = pulp.LpSolutionIntegerFeasible
+        self.assertEqual(_classify_solver_result(Model()), "feasible_limit")
+        reason, bound, gap = _cbc_metadata("Result - Stopped on time limit\nLower bound: 12.5\nGap: 0.25\n")
+        self.assertEqual(reason, "Stopped on time limit")
+        self.assertEqual(bound, 12.5)
+        self.assertEqual(gap, 0.25)
+
+    def test_proven_optimal_and_infeasible_solve_classifications(self):
+        f,a,c=data()
+        result=solve_schedule(f,a,c)
+        self.assertEqual(result["result_classification"], "optimal")
+        self.assertEqual(result["pulp_solution_status"], "Optimal Solution Found")
+        impossible=solve_schedule(f,a.iloc[:1].copy(),c)
+        self.assertEqual(impossible["result_classification"], "infeasible")
+        self.assertTrue(impossible["schedule"].empty)
+
+    def test_failed_solve_has_no_schedule(self):
+        f,a,c=data()
+        with patch("src.scheduler.pulp.PULP_CBC_CMD.actualSolve", side_effect=pulp.PulpSolverError("controlled solver failure")):
+            result=solve_schedule(f,a,c)
+        self.assertEqual(result["result_classification"], "failed")
+        self.assertIn("controlled solver failure", result["solver_termination_reason"])
+        self.assertTrue(result["schedule"].empty)
+
+    def test_fractional_required_crew_count_is_rejected_before_cast(self):
+        f,a,c=data(); f["required_crew_count"]=f.required_crew_count.astype(object); f.loc[0,"required_crew_count"]=1.8
+        with self.assertRaisesRegex(ValueError, r"F1.*required_crew_count"):
+            prepare_data(f,a,c)
+
+    def test_required_crew_count_acceptance_and_rejections(self):
+        f,a,c=data()
+        for value in (1,2,1.0,2.0,"1.0","2.0"):
+            with self.subTest(value=value):
+                candidate=f.copy(); candidate["required_crew_count"]=value
+                normalized,_,_=prepare_data(candidate,a,c)
+                self.assertEqual(set(normalized.required_crew_count),{int(float(value))})
+        for value in (1.8,0,-1,float("nan"),"NaN",float("inf"),float("-inf"),"abc"):
+            with self.subTest(value=value):
+                candidate=f.copy(); candidate["required_crew_count"]=value
+                with self.assertRaisesRegex(ValueError, "required_crew_count"):
+                    prepare_data(candidate,a,c)
+        candidate=f.copy(); candidate["required_crew_count"]=""
+        normalized,_,_=prepare_data(candidate,a,c)
+        self.assertEqual(set(normalized.required_crew_count),{1})
+        candidate=f.copy(); candidate["required_crew_count"]=None
+        normalized,_,_=prepare_data(candidate,a,c)
+        self.assertEqual(set(normalized.required_crew_count),{1})
+
+    def test_csv_like_float_crew_counts_are_validated_without_truncation(self):
+        f,a,c=data(); f["required_crew_count"]=pd.Series([1.0,2.0,1.0],dtype="float64")
+        normalized,_,_=prepare_data(f,a,c)
+        self.assertEqual(normalized.set_index("flight_id").required_crew_count.to_dict(),{"F1":1,"F2":2,"F3":1})
+        f.loc[0,"required_crew_count"]=1.8
+        with self.assertRaisesRegex(ValueError,"F1"):
+            prepare_data(f,a,c)
+
+    def test_csv_parser_preserves_blank_vs_nan_crew_count_values(self):
+        flights,aircraft,crew=data()
+        csv_text="flight_id,origin,destination,departure,arrival,aircraft_type_required,required_crew_count,priority\nX,AAA,BBB,2026-01-01 08:00,2026-01-01 09:00,T,2.0,1\n"
+        parsed=pd.read_csv(StringIO(csv_text))
+        raw=pd.read_csv(StringIO(csv_text),usecols=["required_crew_count"],converters={"required_crew_count":str},keep_default_na=False)
+        parsed["required_crew_count"]=raw.required_crew_count.values
+        normalized,_,_=prepare_data(parsed,aircraft.iloc[:1],crew.iloc[:2])
+        self.assertEqual(int(normalized.required_crew_count.iloc[0]),2)
+        csv_text=csv_text.replace(",2.0,",",1.8,")
+        parsed=pd.read_csv(StringIO(csv_text))
+        raw=pd.read_csv(StringIO(csv_text),usecols=["required_crew_count"],converters={"required_crew_count":str},keep_default_na=False)
+        parsed["required_crew_count"]=raw.required_crew_count.values
+        with self.assertRaisesRegex(ValueError,"required_crew_count"):
+            prepare_data(parsed,aircraft.iloc[:1],crew.iloc[:2])
+        csv_text=csv_text.replace(",1.8,",",,")
+        parsed=pd.read_csv(StringIO(csv_text))
+        raw=pd.read_csv(StringIO(csv_text),usecols=["required_crew_count"],converters={"required_crew_count":str},keep_default_na=False)
+        parsed["required_crew_count"]=raw.required_crew_count.values
+        normalized,_,_=prepare_data(parsed,aircraft.iloc[:1],crew.iloc[:2])
+        self.assertEqual(int(normalized.required_crew_count.iloc[0]),1)
+
+    def test_sanitization_colliding_ids_solve_and_preserve_original_ids(self):
+        flights=pd.DataFrame([
+            ["f-1","AAA","BBB","2026-01-01 08:00","2026-01-01 09:00","T",1,1],
+            ["f_1","AAA","CCC","2026-01-01 08:00","2026-01-01 09:00","T",1,1]],
+            columns=["flight_id","origin","destination","departure","arrival","aircraft_type_required","required_crew_count","priority"])
+        aircraft=pd.DataFrame([
+            ["a-1","AAA","2026-01-01 06:00",100,"T"],
+            ["a_1","AAA","2026-01-01 06:00",100,"T"]],
+            columns=["aircraft_id","initial_location","available_from","cost_per_hour","aircraft_type"])
+        crew=pd.DataFrame([
+            ["c-1","AAA","2026-01-01 06:00","T",8,10],
+            ["c_1","AAA","2026-01-01 06:00","T",8,10]],
+            columns=["crew_id","initial_location","available_from","eligible_aircraft_types","max_work_hours","cost_per_hour"])
+        result=solve_schedule(flights,aircraft,crew)
+        self.assertEqual(result["result_classification"],"optimal",result)
+        schedule=result["schedule"]
+        self.assertEqual(set(schedule.flight_id),{"f-1","f_1"})
+        self.assertEqual(set(schedule.assigned_aircraft),{"a-1","a_1"})
+        self.assertEqual(set(schedule.assigned_crew),{"c-1","c_1"})
+        self.assertTrue(schedule.assigned_aircraft.is_unique)
+        self.assertTrue(schedule.assigned_crew.is_unique)
+        self.assertTrue(set(schedule.assigned_aircraft).issubset({"a-1","a_1"}))
+        self.assertTrue(set(schedule.assigned_crew).issubset({"c-1","c_1"}))
 
 
 if __name__=="__main__": unittest.main()

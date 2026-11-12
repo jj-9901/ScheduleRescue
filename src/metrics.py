@@ -37,7 +37,7 @@ def compare_schedules(initial, recovered, initial_result, recovered_result,
     Externally imposed delays is a mapping from flight ID to added minutes.
     Recovery retiming is not modeled, so recovery-added delay is zero.
     """
-    if recovered_result.get("status") != "Optimal":
+    if recovered_result.get("result_classification", "optimal" if recovered_result.get("status") == "Optimal" else "failed") not in {"optimal", "feasible_limit"}:
         raise ValueError("Cannot calculate schedule metrics for a failed solve.")
     a = initial.set_index("flight_id")
     b = recovered.set_index("flight_id")

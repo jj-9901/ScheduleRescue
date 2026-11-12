@@ -53,7 +53,12 @@ with tabs[1]:
         with cols[2]: uc=st.file_uploader("Crew CSV",type="csv")
         if uf and ua and uc:
             try:
-                df,da,dc=pd.read_csv(uf),pd.read_csv(ua),pd.read_csv(uc)
+                df=pd.read_csv(uf)
+                if "required_crew_count" in df.columns:
+                    uf.seek(0)
+                    raw_count=pd.read_csv(uf,usecols=["required_crew_count"],converters={"required_crew_count":str},keep_default_na=False)
+                    df["required_crew_count"]=raw_count["required_crew_count"].values
+                da,dc=pd.read_csv(ua),pd.read_csv(uc)
                 upload_ready=True
             except Exception as exc:
                 st.error(f"Could not read CSV: {exc}")
@@ -105,8 +110,10 @@ with tabs[2]:
             st.session_state["model_settings"]=active_settings
             st.session_state.pop("recovery_results",None)
     for strategy,result in st.session_state.get("initial_results",{}).items():
-        st.markdown(f"#### {strategy.title()} — {result['status']}")
-        if result["status"]=="Optimal":
+        classification=result.get("result_classification", "failed")
+        st.markdown(f"#### {strategy.title()} — {classification.replace('_',' ').title()}")
+        if classification == "feasible_limit": st.warning("A feasible schedule was found, but optimality was not proven. " + str(result.get("solver_termination_reason", "")))
+        if classification in {"optimal", "feasible_limit"}:
             st.dataframe(result["schedule"],use_container_width=True)
             m=connection_metrics(result["schedule"],int(turnaround))
             cols=st.columns(4); cols[0].metric("Operating cost",f"{result['components']['scheduled_operating_cost']:,.2f}"); cols[1].metric("Aircraft used",result["schedule"].assigned_aircraft.nunique()); cols[2].metric("Crew used",len(set(";".join(result["schedule"].assigned_crew).split(";")))); cols[3].metric("Average connection slack",f"{m['average_connection_slack_minutes'] or 0:.0f} min")
@@ -116,7 +123,7 @@ with tabs[2]:
             with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} crew timeline"),use_container_width=True)
             st.caption(f"Optimization score {result['objective']:,.2f}; flexibility penalty {result['components']['flexibility_penalty']:,.2f}. Score is not an operating cost.")
             csv_download(f"Download {strategy} schedule",result["schedule"],f"{strategy}_schedule.csv")
-        else: st.error(f"Solver returned {result['status']}; this is not a feasible schedule.")
+        else: st.error(f"Solver returned {classification}; this is not a feasible schedule. {result.get('solver_termination_reason', '')}")
 
 with tabs[3]:
     st.subheader("Disruption scenario")
@@ -144,7 +151,7 @@ with tabs[3]:
             recovery={}
             settings=st.session_state["model_settings"]
             for strategy,base in initial.items():
-                if base["status"]!="Optimal": continue
+                if base.get("result_classification") not in {"optimal", "feasible_limit"}: continue
                 oa=dict(zip(base["schedule"].flight_id,base["schedule"].assigned_aircraft))
                 oc={row.flight_id:[x for x in str(row.assigned_crew).split(";") if x] for row in base["schedule"].itertuples()}
                 with st.spinner(f"Recovering {strategy} schedule..."):
@@ -152,7 +159,7 @@ with tabs[3]:
                 recovery[strategy]["solve_context"]={"flights":modified.copy(),"aircraft":a.copy(),"crew":c.copy(),
                     "initial_strategy":strategy,"initial_settings":dict(settings),"disruptions":dict(current_scenario),
                     "recovery_parameters":dict(recovery[strategy].get("solve_parameters",{}))}
-                if recovery[strategy]["status"] == "Optimal":
+                if recovery[strategy].get("result_classification") in {"optimal", "feasible_limit"}:
                     old_aircraft=dict(zip(base["schedule"].flight_id,base["schedule"].assigned_aircraft))
                     old_crew={row.flight_id:set(str(row.assigned_crew).split(";")) for row in base["schedule"].itertuples()}
                     for row in recovery[strategy]["schedule"].itertuples():
@@ -170,16 +177,22 @@ with tabs[3]:
             st.session_state["scenario"]=current_scenario
             comparison={}
             for strategy,result in recovery.items():
-                if result.get("status")=="Optimal":
+                if result.get("result_classification") in {"optimal", "feasible_limit"}:
                     comparison[strategy]=compare_schedules(initial[strategy]["schedule"],result["schedule"],initial[strategy],result,
                         externally_imposed_delays={fid:int(delay_minutes) for fid in delay_ids},expected_flight_ids=flight_ids,
                         turnaround_minutes=settings["turnaround"])
+                    comparison[strategy]["solver_status"] = (
+                        "feasible_limit" if "feasible_limit" in {
+                            result["result_classification"], initial[strategy].get("result_classification", "failed")
+                        } else "optimal")
                 else:
                     comparison[strategy]={"solver_status":result.get("status","Unknown")}
             st.session_state["comparison_results"]=comparison
     for strategy,result in st.session_state.get("recovery_results",{}).items():
-        st.markdown(f"#### {strategy.title()} recovery — {result['status']}")
-        if result["status"]=="Optimal":
+        classification=result.get("result_classification", "failed")
+        st.markdown(f"#### {strategy.title()} recovery — {classification.replace('_',' ').title()}")
+        if classification == "feasible_limit": st.warning("A feasible recovery was found, but optimality was not proven. " + str(result.get("solver_termination_reason", "")))
+        if classification in {"optimal", "feasible_limit"}:
             base=initial[strategy]; st.dataframe(result["schedule"],use_container_width=True)
             metrics=st.session_state.get("comparison_results",{}).get(strategy,{})
             cols=st.columns(4); cols[0].metric("Cancelled flights",metrics["cancelled_flights"]); cols[1].metric("Aircraft changed",metrics["aircraft_changed_flights"]); cols[2].metric("Crew changed",metrics["crew_changed_flights"]); cols[3].metric("Final operating cost",f"{metrics['recovery_operating_cost']:,.2f}")
@@ -188,7 +201,7 @@ with tabs[3]:
             with timeline_cols[0]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_aircraft",f"{strategy.title()} recovered aircraft",base["schedule"]),use_container_width=True)
             with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} recovered crew",base["schedule"]),use_container_width=True)
             csv_download(f"Download {strategy} recovered schedule",result["schedule"],f"{strategy}_recovered_schedule.csv")
-        else: st.error(f"Recovery solver returned {result['status']}.")
+        else: st.error(f"Recovery solver returned {classification}. {result.get('solver_termination_reason', '')}")
 
 with tabs[4]:
     st.subheader("Same disruption, independent recovery MILPs")
@@ -196,11 +209,11 @@ with tabs[4]:
     rows=[]
     for strategy,result in recs.items():
         base=bases[strategy]
-        if result["status"]=="Optimal": rows.append({"Strategy":strategy.title(),**st.session_state.get("comparison_results",{}).get(strategy,{})})
-        else: rows.append({"Strategy":strategy.title(),"solver_status":result["status"]})
+        if result.get("result_classification") in {"optimal", "feasible_limit"}: rows.append({"Strategy":strategy.title(),**st.session_state.get("comparison_results",{}).get(strategy,{})})
+        else: rows.append({"Strategy":strategy.title(),"solver_status":result.get("result_classification", "failed")})
     if rows:
         table=pd.DataFrame(rows); st.dataframe(table,use_container_width=True); csv_download("Download comparison CSV",table,"strategy_comparison.csv")
-        valid=table[table.solver_status=="Optimal"]
+        valid=table[table.solver_status=="optimal"]
         if not valid.empty:
             for metric,title in [("initial_operating_cost","Initial operating cost"),("recovery_operating_cost","Recovered operating cost"),("total_modeled_recovery_cost","Total modeled recovery cost"),("cancelled_flights","Cancelled flights"),("operated_externally_delayed_flights","Operated externally delayed flights"),("aircraft_changed_flights","Aircraft assignment changes"),("crew_changed_flights","Crew assignment changes"),("unique_changed_flights","Unique flights changed")]:
                 st.plotly_chart(px.bar(valid,x="Strategy",y=metric,title=title),use_container_width=True)

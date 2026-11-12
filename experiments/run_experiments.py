@@ -86,8 +86,15 @@ def run_experiments(output_path=None):
                    "recovery_parameters": json.dumps(RECOVERY_PARAMETERS, sort_keys=True),
                    "dependency_versions": json.dumps(_versions(), sort_keys=True),
                    "initial_solver_status": initial.get("status", "Unknown"),
+                   "initial_result_classification": initial.get("result_classification", "failed"),
+                   "initial_solver_termination_reason": initial.get("solver_termination_reason", ""),
+                   "initial_best_bound": initial.get("best_bound"),
+                   "initial_optimality_gap": initial.get("optimality_gap"),
                    "initial_solver_runtime_seconds": initial.get("solver_runtime_seconds"),
-                   "solver_status": "NotRunInitialInfeasible", "solver_runtime_seconds": None,
+                   "solver_status": "not_run_initial", "result_classification": "not_run_initial",
+                   "recovery_result_classification": "not_run_initial",
+                   "solver_termination_reason": "", "best_bound": None, "optimality_gap": None,
+                   "solver_runtime_seconds": None,
                    "initial_operating_cost": None, "recovered_operating_cost": None,
                    "recovery_penalties": None, "cancellation_penalty": None,
                    "aircraft_reassignment_penalty": None, "crew_reassignment_penalty": None,
@@ -102,8 +109,10 @@ def run_experiments(output_path=None):
                    "unique_changed_flight_count": None, "initial_connection_slack": None,
                    "recovered_connection_slack": None, "initial_error": initial.get("solver_message", ""),
                    "recovery_error": ""}
-            if initial.get("status") != "Optimal":
-                row["solver_status"] = "NotRunInitialInfeasible"
+            if initial.get("result_classification", "optimal" if initial.get("status") == "Optimal" else "failed") not in {"optimal", "feasible_limit"}:
+                row["solver_status"] = "not_run_initial"
+                row["result_classification"] = "not_run_initial"
+                row["solver_termination_reason"] = initial.get("solver_termination_reason", initial.get("solver_message", ""))
                 rows.append(row)
                 continue
             disrupted = _apply_delays(flights, scenario["delays"])
@@ -121,9 +130,19 @@ def run_experiments(output_path=None):
             except Exception as exc:
                 recovered = {"status": "Error", "solver_message": str(exc), "schedule": pd.DataFrame(), "components": {}}
             row["solver_status"] = recovered.get("status", "Unknown")
+            recovery_classification = recovered.get("result_classification", "optimal" if recovered.get("status") == "Optimal" else "failed")
+            row["recovery_result_classification"] = recovery_classification
+            initial_classification = initial.get("result_classification", "optimal" if initial.get("status") == "Optimal" else "failed")
+            row["result_classification"] = (
+                "feasible_limit" if "feasible_limit" in {initial_classification, recovery_classification}
+                else recovery_classification)
+            row["solver_status"] = row["result_classification"]
+            row["solver_termination_reason"] = recovered.get("solver_termination_reason", recovered.get("solver_message", ""))
+            row["best_bound"] = recovered.get("best_bound")
+            row["optimality_gap"] = recovered.get("optimality_gap")
             row["solver_runtime_seconds"] = recovered.get("solver_runtime_seconds")
             row["recovery_error"] = recovered.get("solver_message", "")
-            if recovered.get("status") == "Optimal":
+            if row["result_classification"] in {"optimal", "feasible_limit"}:
                 metrics = compare_schedules(initial["schedule"], recovered["schedule"], initial, recovered,
                     externally_imposed_delays=scenario["delays"], expected_flight_ids=flights.flight_id,
                     turnaround_minutes=RECOVERY_PARAMETERS["turnaround_minutes"])
@@ -143,6 +162,7 @@ def run_experiments(output_path=None):
                     "unique_changed_flight_count": metrics["unique_changed_flights"],
                     "initial_connection_slack": connection_metrics(initial["schedule"], 45)["average_connection_slack_minutes"],
                     "recovered_connection_slack": connection_metrics(recovered["schedule"], 45)["average_connection_slack_minutes"]})
+                row["solver_status"] = row["result_classification"]
             rows.append(row)
     result = pd.DataFrame(rows)
     path = Path(output_path) if output_path else ROOT / "experiments/results/experiment_results.csv"
