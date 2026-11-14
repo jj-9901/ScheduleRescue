@@ -39,6 +39,39 @@ RECOVERY_PARAMETERS = {"turnaround_minutes": 45, "crew_rest_minutes": 30,
                        "crew_change_penalty": 100.0,
                        "recovery_strategy": "normal"}
 
+def _pair_outcome(initial_classification, recovery_classification):
+    """Return the mutually exclusive outcome of the initial/recovery solve pair."""
+    usable = {"optimal", "feasible_limit"}
+    if initial_classification not in usable:
+        return "failed_pair", f"Initial solve was {initial_classification}; recovery was not attempted."
+    if recovery_classification not in usable:
+        return "failed_pair", f"Recovery solve was {recovery_classification}."
+    if initial_classification == recovery_classification == "optimal":
+        return "optimal_pair", "Both initial and recovery solves were proven optimal."
+    if initial_classification == "feasible_limit" and recovery_classification == "feasible_limit":
+        return "feasible_pair", "Both solves produced feasible schedules; optimality was not proven for either."
+    limited = "initial" if initial_classification == "feasible_limit" else "recovery"
+    return "feasible_pair", f"Both solves produced usable schedules; {limited} solve optimality was not proven."
+
+
+def _classification(result):
+    return result.get("result_classification", "optimal" if result.get("status") == "Optimal" else "failed")
+
+
+def _pair_detail(initial_classification, recovery_classification):
+    if initial_classification not in {"optimal", "feasible_limit"}:
+        return f"initial_{initial_classification}"
+    if recovery_classification not in {"optimal", "feasible_limit"}:
+        return f"recovery_{recovery_classification}"
+    return f"initial_{initial_classification}_recovery_{recovery_classification}"
+
+
+def _validated_parameters(parameters, supported, label):
+    unsupported = set(parameters) - set(supported)
+    if unsupported:
+        raise ValueError(f"Unsupported {label} experiment configuration: {sorted(unsupported)}")
+    return dict(parameters)
+
 
 def _versions():
     cbc = pulp.PULP_CBC_CMD().available()
@@ -63,6 +96,10 @@ def _apply_delays(flights, delays):
 
 
 def run_experiments(output_path=None):
+    initial_parameters = _validated_parameters(INITIAL_PARAMETERS,
+        {"turnaround_minutes", "crew_rest_minutes", "buffer_minutes", "flexibility_target_minutes", "flexibility_penalty_per_minute"}, "initial")
+    recovery_parameters = _validated_parameters(RECOVERY_PARAMETERS,
+        {"turnaround_minutes", "crew_rest_minutes", "cancellation_penalty", "aircraft_change_penalty", "crew_change_penalty", "recovery_strategy"}, "recovery")
     flights, aircraft, crew = prepare_data(
         pd.read_csv(ROOT / "data/demo_flights.csv"),
         pd.read_csv(ROOT / "data/demo_aircraft.csv"),
@@ -73,17 +110,25 @@ def run_experiments(output_path=None):
     if unknown:
         raise ValueError(f"Experiment scenarios reference missing demo IDs: {sorted(unknown)}")
     rows = []
+    operating_cost_weights = {
+        "aircraft": dict(zip(aircraft.aircraft_id, aircraft.cost_per_hour)),
+        "crew": dict(zip(crew.crew_id, crew.cost_per_hour)),
+    }
     for strategy in STRATEGIES:
         try:
             initial = solve_schedule(flights, aircraft, crew, strategy=strategy,
-                                     **{k: v for k, v in INITIAL_PARAMETERS.items() if k != "crew_rest_minutes"})
+                                     **initial_parameters)
         except Exception as exc:
-            initial = {"status": "Error", "solver_message": str(exc), "schedule": pd.DataFrame(), "components": {}}
+            initial = {"status": "Error", "result_classification": "failed", "solver_message": str(exc), "solver_termination_reason": str(exc), "schedule": pd.DataFrame(), "components": {}}
         for scenario in SCENARIOS:
             row = {"scenario_id": scenario["scenario_id"], "strategy": strategy,
                    "scenario_parameters": json.dumps(scenario, sort_keys=True),
-                   "initial_parameters": json.dumps({**INITIAL_PARAMETERS, "strategy": strategy}, sort_keys=True),
-                   "recovery_parameters": json.dumps(RECOVERY_PARAMETERS, sort_keys=True),
+                   "initial_parameters": json.dumps({**initial_parameters, "strategy": strategy}, sort_keys=True),
+                   "recovery_parameters": json.dumps(recovery_parameters, sort_keys=True),
+                   "initial_solve_parameters": json.dumps(initial.get("solve_parameters", {
+                       **initial_parameters, "strategy": strategy, "operating_cost_weights": operating_cost_weights,
+                       "time_limit": 30}), sort_keys=True),
+                   "recovery_solve_parameters": "",
                    "dependency_versions": json.dumps(_versions(), sort_keys=True),
                    "initial_solver_status": initial.get("status", "Unknown"),
                    "initial_result_classification": initial.get("result_classification", "failed"),
@@ -93,6 +138,7 @@ def run_experiments(output_path=None):
                    "initial_solver_runtime_seconds": initial.get("solver_runtime_seconds"),
                    "solver_status": "not_run_initial", "result_classification": "not_run_initial",
                    "recovery_result_classification": "not_run_initial",
+                   "pair_outcome": "", "pair_status_detail": "", "pair_failure_reason": "",
                    "solver_termination_reason": "", "best_bound": None, "optimality_gap": None,
                    "solver_runtime_seconds": None,
                    "initial_operating_cost": None, "recovered_operating_cost": None,
@@ -109,43 +155,59 @@ def run_experiments(output_path=None):
                    "unique_changed_flight_count": None, "initial_connection_slack": None,
                    "recovered_connection_slack": None, "initial_error": initial.get("solver_message", ""),
                    "recovery_error": ""}
-            if initial.get("result_classification", "optimal" if initial.get("status") == "Optimal" else "failed") not in {"optimal", "feasible_limit"}:
+            initial_classification = _classification(initial)
+            row["initial_result_classification"] = initial_classification
+            if initial_classification not in {"optimal", "feasible_limit"}:
                 row["solver_status"] = "not_run_initial"
                 row["result_classification"] = "not_run_initial"
+                row["pair_outcome"], row["pair_failure_reason"] = _pair_outcome(initial_classification, "not_run_initial")
+                row["pair_status_detail"] = _pair_detail(initial_classification, "not_run_initial")
                 row["solver_termination_reason"] = initial.get("solver_termination_reason", initial.get("solver_message", ""))
+                row["recovery_error"] = "Recovery not attempted because initial solve produced no usable schedule."
                 rows.append(row)
                 continue
             disrupted = _apply_delays(flights, scenario["delays"])
             assignment = dict(zip(initial["schedule"].flight_id, initial["schedule"].assigned_aircraft))
             crew_assignment = {r.flight_id: [x for x in str(r.assigned_crew).split(";") if x]
                                for r in initial["schedule"].itertuples()}
+            recovery_call_parameters = {}
             try:
-                recovered = solve_schedule(disrupted, aircraft, crew,
-                    turnaround_minutes=RECOVERY_PARAMETERS["turnaround_minutes"],
-                    crew_rest_minutes=RECOVERY_PARAMETERS["crew_rest_minutes"],
+                recovery_call_parameters = dict(
+                    turnaround_minutes=recovery_parameters["turnaround_minutes"],
+                    crew_rest_minutes=recovery_parameters["crew_rest_minutes"],
                     unavailable_aircraft=scenario["aircraft"], unavailable_crew=scenario["crew"],
                     cancelled_flights=scenario["cancel"], original_assignment=assignment,
                     original_crew_assignment=crew_assignment, allow_cancellation=True,
-                    strategy="normal", cancellation_penalty=RECOVERY_PARAMETERS["cancellation_penalty"])
+                    strategy=recovery_parameters["recovery_strategy"],
+                    cancellation_penalty=recovery_parameters["cancellation_penalty"],
+                    aircraft_change_penalty=recovery_parameters["aircraft_change_penalty"],
+                    crew_change_penalty=recovery_parameters["crew_change_penalty"])
+                row["recovery_solve_parameters"] = json.dumps(recovery_call_parameters, sort_keys=True)
+                recovered = solve_schedule(disrupted, aircraft, crew, **recovery_call_parameters)
+                row["recovery_solve_parameters"] = json.dumps(recovered.get("solve_parameters", {
+                    **recovery_call_parameters, "operating_cost_weights": operating_cost_weights,
+                    "time_limit": 30}), sort_keys=True)
             except Exception as exc:
-                recovered = {"status": "Error", "solver_message": str(exc), "schedule": pd.DataFrame(), "components": {}}
+                recovered = {"status": "Error", "result_classification": "failed", "solver_message": str(exc), "solver_termination_reason": str(exc), "schedule": pd.DataFrame(), "components": {}}
+            if not recovered.get("solve_parameters"):
+                row["recovery_solve_parameters"] = json.dumps({
+                    **recovery_call_parameters, "operating_cost_weights": operating_cost_weights,
+                    "time_limit": 30}, sort_keys=True)
             row["solver_status"] = recovered.get("status", "Unknown")
-            recovery_classification = recovered.get("result_classification", "optimal" if recovered.get("status") == "Optimal" else "failed")
+            recovery_classification = _classification(recovered)
             row["recovery_result_classification"] = recovery_classification
-            initial_classification = initial.get("result_classification", "optimal" if initial.get("status") == "Optimal" else "failed")
-            row["result_classification"] = (
-                "feasible_limit" if "feasible_limit" in {initial_classification, recovery_classification}
-                else recovery_classification)
-            row["solver_status"] = row["result_classification"]
+            row["result_classification"] = recovery_classification
+            row["pair_outcome"], row["pair_failure_reason"] = _pair_outcome(initial_classification, recovery_classification)
+            row["pair_status_detail"] = _pair_detail(initial_classification, recovery_classification)
             row["solver_termination_reason"] = recovered.get("solver_termination_reason", recovered.get("solver_message", ""))
             row["best_bound"] = recovered.get("best_bound")
             row["optimality_gap"] = recovered.get("optimality_gap")
             row["solver_runtime_seconds"] = recovered.get("solver_runtime_seconds")
             row["recovery_error"] = recovered.get("solver_message", "")
-            if row["result_classification"] in {"optimal", "feasible_limit"}:
+            if row["pair_outcome"] in {"optimal_pair", "feasible_pair"}:
                 metrics = compare_schedules(initial["schedule"], recovered["schedule"], initial, recovered,
                     externally_imposed_delays=scenario["delays"], expected_flight_ids=flights.flight_id,
-                    turnaround_minutes=RECOVERY_PARAMETERS["turnaround_minutes"])
+                    turnaround_minutes=recovery_parameters["turnaround_minutes"])
                 row.update({"initial_operating_cost": metrics["initial_operating_cost"],
                     "recovered_operating_cost": metrics["recovery_operating_cost"],
                     "recovery_penalties": metrics["recovery_penalties"],
@@ -163,6 +225,8 @@ def run_experiments(output_path=None):
                     "initial_connection_slack": connection_metrics(initial["schedule"], 45)["average_connection_slack_minutes"],
                     "recovered_connection_slack": connection_metrics(recovered["schedule"], 45)["average_connection_slack_minutes"]})
                 row["solver_status"] = row["result_classification"]
+            else:
+                row["solver_status"] = recovery_classification
             rows.append(row)
     result = pd.DataFrame(rows)
     path = Path(output_path) if output_path else ROOT / "experiments/results/experiment_results.csv"

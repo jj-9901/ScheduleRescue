@@ -73,6 +73,8 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
                    flexibility_target_minutes=90,
                    flexibility_penalty_per_minute=5,
                    cancellation_penalty=CANCEL_PENALTY,
+                   aircraft_change_penalty=AIRCRAFT_CHANGE_PENALTY,
+                   crew_change_penalty=CREW_CHANGE_PENALTY,
                    time_limit=30):
     """Solve a time-space route assignment MILP.
 
@@ -193,8 +195,8 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
     op_cost = pulp.lpSum(((fd[i]["arrival"]-fd[i]["departure"]).total_seconds()/3600)*float(ad[j]["cost_per_hour"])*x[i,j] for i in F for j in A)
     crew_cost = pulp.lpSum(((fd[i]["arrival"]-fd[i]["departure"]).total_seconds()/3600)*float(cd[j]["cost_per_hour"])*y[i,j] for i in F for j in C)
     cancel_cost = pulp.lpSum(float(cancellation_penalty)*float(fd[i]["priority"])*z[i] for i in F)
-    aircraft_change = pulp.lpSum(AIRCRAFT_CHANGE_PENALTY*x[i,j] for i in F for j in A if i in original_assignment and original_assignment[i] != j)
-    crew_change = pulp.lpSum(CREW_CHANGE_PENALTY*y[i,j] for i in F for j in C if i in original_crew_assignment and j not in set(original_crew_assignment[i]))
+    aircraft_change = pulp.lpSum(float(aircraft_change_penalty)*x[i,j] for i in F for j in A if i in original_assignment and original_assignment[i] != j)
+    crew_change = pulp.lpSum(float(crew_change_penalty)*y[i,j] for i in F for j in C if i in original_crew_assignment and j not in set(original_crew_assignment[i]))
     tight_penalty = pulp.LpAffineExpression()
     if strategy == "flexible":
         for (i,k,j),v in arcs.items():
@@ -261,8 +263,10 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
             "solve_parameters":{"turnaround_minutes":turnaround_minutes,"crew_rest_minutes":crew_rest_minutes,
                 "strategy":strategy,"buffer_minutes":buffer_minutes,"flexibility_target_minutes":flexibility_target_minutes,
                 "flexibility_penalty_per_minute":flexibility_penalty_per_minute,"cancellation_penalty":cancellation_penalty,
-                "aircraft_change_penalty":AIRCRAFT_CHANGE_PENALTY,"crew_change_penalty":CREW_CHANGE_PENALTY,
+                "aircraft_change_penalty":aircraft_change_penalty,"crew_change_penalty":crew_change_penalty,
                 "unavailable_aircraft":sorted(unavailable_aircraft),"unavailable_crew":sorted(unavailable_crew),
                 "unavailable_periods":periods,"cancelled_flights":sorted(cancelled_flights),
                 "original_assignment":original_assignment,"original_crew_assignment":original_crew_assignment,
-                "allow_cancellation":allow_cancellation}}
+                "allow_cancellation":allow_cancellation,"time_limit":time_limit,
+                "operating_cost_weights":{"aircraft":dict(zip(a.aircraft_id, a.cost_per_hour)),
+                    "crew":dict(zip(c.crew_id, c.cost_per_hour))}}}
