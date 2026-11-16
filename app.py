@@ -52,9 +52,9 @@ with tabs[1]:
     upload_ready = method != "Upload CSV"
     if method=="Edit manually":
         st.caption("Time format: YYYY-MM-DD HH:MM. Aircraft type ANY matches any type; crew eligible types are semicolon-separated.")
-        df=st.data_editor(df,num_rows="dynamic",key="edit_flights",use_container_width=True)
-        da=st.data_editor(da,num_rows="dynamic",key="edit_aircraft",use_container_width=True)
-        dc=st.data_editor(dc,num_rows="dynamic",key="edit_crew",use_container_width=True)
+        df=st.data_editor(df,num_rows="dynamic",key="edit_flights",width="stretch")
+        da=st.data_editor(da,num_rows="dynamic",key="edit_aircraft",width="stretch")
+        dc=st.data_editor(dc,num_rows="dynamic",key="edit_crew",width="stretch")
     elif method=="Upload CSV":
         cols=st.columns(3)
         with cols[0]: uf=st.file_uploader("Flights CSV",type="csv")
@@ -123,13 +123,13 @@ with tabs[2]:
         st.markdown(f"#### {strategy.title()} — {classification.replace('_',' ').title()}")
         if classification == "feasible_limit": st.warning("A feasible schedule was found, but optimality was not proven. " + str(result.get("solver_termination_reason", "")))
         if classification in {"optimal", "feasible_limit"}:
-            st.dataframe(result["schedule"],use_container_width=True)
+            st.dataframe(result["schedule"],width="stretch")
             m=connection_metrics(result["schedule"],int(turnaround))
             cols=st.columns(4); cols[0].metric("Operating cost",f"{result['components']['scheduled_operating_cost']:,.2f}"); cols[1].metric("Aircraft used",result["schedule"].assigned_aircraft.nunique()); cols[2].metric("Crew used",len(set(";".join(result["schedule"].assigned_crew).split(";")))); cols[3].metric("Average connection slack",f"{m['average_connection_slack_minutes'] or 0:.0f} min")
             st.caption(f"Average connection gap: {m['average_connection_gap_minutes'] if m['average_connection_gap_minutes'] is not None else '—'} min · Minimum gap: {m['minimum_connection_gap_minutes'] if m['minimum_connection_gap_minutes'] is not None else '—'} min · Minimum slack: {m['minimum_connection_slack_minutes'] if m['minimum_connection_slack_minutes'] is not None else '—'} min")
             timeline_cols=st.columns(2)
-            with timeline_cols[0]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_aircraft",f"{strategy.title()} aircraft timeline"),use_container_width=True)
-            with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} crew timeline"),use_container_width=True)
+            with timeline_cols[0]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_aircraft",f"{strategy.title()} aircraft timeline"),width="stretch")
+            with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} crew timeline"),width="stretch")
             st.caption(f"Optimization score {result['objective']:,.2f}; flexibility penalty {result['components']['flexibility_penalty']:,.2f}. Score is not an operating cost.")
             csv_download(f"Download {strategy} schedule",result["schedule"],f"{strategy}_schedule.csv")
         else: st.error(f"Solver returned {classification}; this is not a feasible schedule. {result.get('solver_termination_reason', '')}")
@@ -202,13 +202,13 @@ with tabs[3]:
         st.markdown(f"#### {strategy.title()} recovery — {classification.replace('_',' ').title()}")
         if classification == "feasible_limit": st.warning("A feasible recovery was found, but optimality was not proven. " + str(result.get("solver_termination_reason", "")))
         if classification in {"optimal", "feasible_limit"}:
-            base=initial[strategy]; st.dataframe(result["schedule"],use_container_width=True)
+            base=initial[strategy]; st.dataframe(result["schedule"],width="stretch")
             metrics=st.session_state.get("comparison_results",{}).get(strategy,{})
             cols=st.columns(4); cols[0].metric("Cancelled flights",metrics["cancelled_flights"]); cols[1].metric("Aircraft changed",metrics["aircraft_changed_flights"]); cols[2].metric("Crew changed",metrics["crew_changed_flights"]); cols[3].metric("Final operating cost",f"{metrics['recovery_operating_cost']:,.2f}")
             st.caption(f"Unique flights with assignment changes: {metrics['unique_changed_flights']}. Externally delayed: {metrics['externally_imposed_delay_flights']}; operated delayed: {metrics['operated_externally_delayed_flights']}; cancelled after delay: {metrics['cancelled_externally_delayed_flights']}; recovery-added delay: {metrics['recovery_added_delay_minutes']} minutes.")
             timeline_cols=st.columns(2)
-            with timeline_cols[0]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_aircraft",f"{strategy.title()} recovered aircraft",base["schedule"]),use_container_width=True)
-            with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} recovered crew",base["schedule"]),use_container_width=True)
+            with timeline_cols[0]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_aircraft",f"{strategy.title()} recovered aircraft",base["schedule"]),width="stretch")
+            with timeline_cols[1]: st.plotly_chart(resource_timeline(result["schedule"],"assigned_crew",f"{strategy.title()} recovered crew",base["schedule"]),width="stretch")
             csv_download(f"Download {strategy} recovered schedule",result["schedule"],f"{strategy}_recovered_schedule.csv")
         else: st.error(f"Recovery solver returned {classification}. {result.get('solver_termination_reason', '')}")
 
@@ -221,7 +221,7 @@ with tabs[4]:
         if result.get("result_classification") in {"optimal", "feasible_limit"}: rows.append({"Strategy":strategy.title(),**st.session_state.get("comparison_results",{}).get(strategy,{})})
         else: rows.append({"Strategy":strategy.title(),"solver_status":result.get("result_classification", "failed")})
     if rows:
-        table=pd.DataFrame(rows); st.dataframe(table,use_container_width=True); csv_download("Download comparison CSV",table,"strategy_comparison.csv")
+        table=pd.DataFrame(rows); st.dataframe(table,width="stretch"); csv_download("Download comparison CSV",table,"strategy_comparison.csv")
         valid=table[table.solver_status.isin(["optimal", "feasible_limit"])].copy()
         if not valid.empty:
             valid["Solution status"]=valid.solver_status.map({"optimal":"Proven optimal", "feasible_limit":"Feasible; optimality not proven"})
@@ -229,7 +229,7 @@ with tabs[4]:
                 st.warning("Comparison includes feasible schedules whose optimality was not proven. Chart legends identify these results.")
             for metric,title in [("initial_operating_cost","Initial operating cost"),("recovery_operating_cost","Recovered operating cost"),("total_modeled_recovery_cost","Total modeled recovery cost"),("cancelled_flights","Cancelled flights"),("operated_externally_delayed_flights","Operated externally delayed flights"),("aircraft_changed_flights","Aircraft assignment changes"),("crew_changed_flights","Crew assignment changes"),("unique_changed_flights","Unique flights changed")]:
                 st.plotly_chart(px.bar(valid,x="Strategy",y=metric,color="Solution status",title=title,
-                    color_discrete_map={"Proven optimal":"#2563eb", "Feasible; optimality not proven":"#d97706"}),use_container_width=True)
+                    color_discrete_map={"Proven optimal":"#2563eb", "Feasible; optimality not proven":"#d97706"}),width="stretch")
             st.caption("Total modeled recovery cost = recovered operating cost + cancellation, aircraft change, crew change, and other recovery penalties. Strategy preference scores are separate. Initial cost is shown for comparison only.")
     else: st.info("Run recovery on one or more schedules to compare actual solver results.")
 
