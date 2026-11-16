@@ -12,6 +12,14 @@ METRICS = ["initial_operating_cost", "recovered_operating_cost", "recovery_penal
           "cancelled_externally_delayed_flights", "aircraft_reassignment_count",
           "crew_reassignment_count", "unique_changed_flight_count", "initial_connection_slack",
           "recovered_connection_slack"]
+COMPARISON_CHARTS = ("initial_vs_recovered_cost.html", "cancellations.html",
+                     "assignment_changes.html", "delay_comparison.html")
+
+
+def _no_comparison_page(output):
+    page = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Latest analysis: no comparison available</title></head><body><h1>Latest analysis: no comparison available</h1><p>No scenarios were successfully completed by every strategy. Comparison charts are unavailable for this analysis run.</p></body></html>\n"
+    for filename in COMPARISON_CHARTS:
+        (output / filename).write_text(page, encoding="utf-8")
 
 
 def _status(series):
@@ -115,7 +123,10 @@ def analyze(path=None):
         for filename, metrics, title in charts:
             chart_frame = long[long.metric.isin(metrics)]
             if not chart_frame.empty:
-                px.bar(chart_frame, x="scenario_id", y="value", color="strategy", barmode="group", facet_col="metric", title=title).write_html(output / filename, include_plotlyjs="cdn")
+                chart = px.bar(chart_frame, x="scenario_id", y="value", color="strategy", barmode="group", facet_col="metric", title=f"Latest analysis ({len(common_ids)} common scenarios): {title}")
+                chart.write_html(output / filename, include_plotlyjs="cdn", div_id=filename.removesuffix(".html").replace("_", "-"))
+            else:
+                (output / filename).write_text(f"<!doctype html><html><body><h1>Latest analysis ({len(common_ids)} common scenarios): no chart metrics available</h1></body></html>\n", encoding="utf-8")
         winners = []
         for scenario_id, group in common.groupby("scenario_id"):
             best = group.total_modeled_recovery_cost.min()
@@ -123,6 +134,7 @@ def analyze(path=None):
             winners.append(f"- **{scenario_id}:** {names} had the lowest total modeled recovery cost ({best:,.2f}).")
         differences_text = differences.to_string()
     else:
+        _no_comparison_page(output)
         differences = pd.DataFrame()
         differences.to_csv(output / "scenario_cost_differences.csv")
         winners = ["No common successful scenarios are available; no cross-strategy averages or cost comparisons were calculated."]

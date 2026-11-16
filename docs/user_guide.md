@@ -24,10 +24,10 @@ The app runs a separate recovery MILP for every successful initial plan. A fligh
 - **Recovery cost increase:** recovered operating cost minus initial operating cost; can be negative if flights are cancelled.
 - **Cancelled:** flight was explicitly cancelled or had no preferable feasible assignment under the chosen recovery penalties.
 - **Aircraft reassigned / crew changed:** differs from the corresponding initial allocation.
-- **Solver status:** only Optimal is presented as a feasible optimized schedule; other statuses need investigation.
+- **Solver status:** a pair is optimal only when both initial and recovery solves are proven optimal. A pair is feasible when both solves have usable schedules but at least one is not proven optimal. Failed pairs are retained for reporting but are not scored as successful recoveries.
 - **Total operational cost:** final operating cost plus modeled recovery penalties, with initial schedule cost not added twice.
 
-- **Connection gap:** next departure minus previous arrival on the same aircraft route. **Connection slack:** connection gap minus required turnaround.
+- **Connection gap:** next departure minus previous arrival on the same aircraft route. **Connection slack:** connection gap minus the configured turnaround for that solve.
 - **Externally imposed delays:** the user selected delay count and minutes. **Operated delayed flights** exclude delayed flights that were cancelled; those appear separately as **cancelled after external delay**. Recovery-added delay is zero because the model does not retime flights.
 - **Unique changed flights:** the union of flights with aircraft or crew assignment changes; the two change counts are also reported separately.
 - **Unexpectedly uncovered flights:** expected flight IDs absent from the accepted schedule. An incomplete result is not treated as a successful solver schedule.
@@ -36,3 +36,5 @@ The app runs a separate recovery MILP for every successful initial plan. A fligh
 Changing the input data, strategy selection, turnaround, buffer, or target clears results generated under the earlier settings. Changing a disruption clears its recovery and comparison outputs. Each solve also retains its model settings for reproducibility.
 
 All schedule and comparison tables can be downloaded as CSV.
+
+Strategy comparisons use scenarios where every strategy has a successful initial/recovery pair. Individual strategy success and failure counts are reported separately; strategy-specific averages use each strategy's own successful scenarios only as supplementary results.

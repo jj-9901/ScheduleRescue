@@ -166,6 +166,112 @@ class ExperimentAnalysisTests(unittest.TestCase):
             interpretation = (source.parent / "analysis" / "interpretation.md").read_text()
             self.assertIn("No common successful scenarios", interpretation)
 
+    def test_chart_outputs_replace_stale_charts_and_preserve_unrelated_files(self):
+        table = self.table({"normal": {"s1", "s2", "s3"},
+                            "buffered": {"s1", "s2", "s3"},
+                            "flexible": {"s1", "s2", "s3"}})
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "input.csv"
+            output = source.parent / "analysis"
+            output.mkdir()
+            unrelated = output / "notes.txt"
+            unrelated.write_text("keep", encoding="utf-8")
+            for name in analyze_results.COMPARISON_CHARTS:
+                (output / name).write_text("old chart", encoding="utf-8")
+            table.to_csv(source, index=False)
+            analyze_results.analyze(source)
+            first = {name: (output / name).read_bytes() for name in analyze_results.COMPARISON_CHARTS}
+            self.assertTrue(all(b"Latest analysis" in body for body in first.values()))
+            analyze_results.analyze(source)
+            second = {name: (output / name).read_bytes() for name in analyze_results.COMPARISON_CHARTS}
+            self.assertEqual(first, second)
+            self.assertIn(b"s1", (output / "initial_vs_recovered_cost.html").read_bytes())
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
+
+            no_common = self.table({"normal": {"s1"}, "buffered": {"s2"}, "flexible": {"s3"}})
+            no_common.to_csv(source, index=False)
+            analyze_results.analyze(source)
+            for name in analyze_results.COMPARISON_CHARTS:
+                page = (output / name).read_text(encoding="utf-8")
+                self.assertIn("no comparison available", page)
+                self.assertNotIn("Plotly.newPlot", page)
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
+
+    def test_analysis_creates_output_directory_and_current_charts(self):
+        table = self.table({"normal": {"s1"}, "buffered": {"s1"}, "flexible": {"s1"}})
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "input.csv"
+            table.to_csv(source, index=False)
+            analyze_results.analyze(source)
+            output = source.parent / "analysis"
+            self.assertTrue(all((output / name).is_file() for name in analyze_results.COMPARISON_CHARTS))
+            self.assertIn("Latest analysis", (output / "cancellations.html").read_text(encoding="utf-8"))
+
+
+class ExperimentSlackTests(unittest.TestCase):
+    def test_exported_slack_uses_each_solve_turnaround(self):
+        original_initial = dict(run_experiments.INITIAL_PARAMETERS)
+        original_recovery = dict(run_experiments.RECOVERY_PARAMETERS)
+        try:
+            for turnaround in (30, 45, 60):
+                run_experiments.INITIAL_PARAMETERS["turnaround_minutes"] = turnaround
+                run_experiments.RECOVERY_PARAMETERS["turnaround_minutes"] = 45
+                with tempfile.TemporaryDirectory() as tmp:
+                    captured = []
+                    real_solve = run_experiments.solve_schedule
+                    def record(*args, **kwargs):
+                        solved = real_solve(*args, **kwargs)
+                        captured.append((dict(kwargs), solved))
+                        return solved
+                    with patch.object(run_experiments, "solve_schedule", side_effect=record):
+                        result, path = run_experiments.run_experiments(Path(tmp) / "metrics.csv")
+                    exported = pd.read_csv(path)
+                    successful = result[result.pair_outcome.isin(["optimal_pair", "feasible_pair"])]
+                    exported_success = exported[exported.pair_outcome.isin(["optimal_pair", "feasible_pair"])]
+                    self.assertFalse(successful.empty)
+                    for frame in (successful, exported_success):
+                        self.assertTrue((frame.initial_connection_slack_turnaround_minutes == turnaround).all())
+                        self.assertTrue((frame.recovered_connection_slack_turnaround_minutes == 45).all())
+                    from src.metrics import connection_metrics
+                    initial_schedules = {kw["strategy"]: solved["schedule"] for kw, solved in captured if not kw.get("original_assignment")}
+                    recoveries = [solved for kw, solved in captured if kw.get("original_assignment")]
+                    for row in successful.itertuples():
+                        self.assertAlmostEqual(row.initial_connection_slack,
+                            connection_metrics(initial_schedules[row.strategy], turnaround)["average_connection_slack_minutes"])
+                    for strategy in run_experiments.STRATEGIES:
+                        result_rows = result[result.strategy == strategy].reset_index(drop=True)
+                        offset = run_experiments.STRATEGIES.index(strategy) * len(run_experiments.SCENARIOS)
+                        for index, row in result_rows.iterrows():
+                            if row.pair_outcome in {"optimal_pair", "feasible_pair"}:
+                                schedule = recoveries[offset + index]["schedule"]
+                                self.assertAlmostEqual(row.recovered_connection_slack,
+                                    connection_metrics(schedule, 45)["average_connection_slack_minutes"])
+                    means = successful.groupby("strategy").initial_connection_slack.mean()
+                    if turnaround == 30:
+                        self.assertEqual(means["normal"], 30)
+                        self.assertEqual(means["buffered"], 30)
+                        self.assertEqual(means["flexible"], 130)
+                    elif turnaround == 45:
+                        self.assertEqual(means["normal"], 15)
+                        self.assertEqual(means["buffered"], 115)
+                        self.assertEqual(means["flexible"], 115)
+                    else:
+                        self.assertEqual(means["normal"], 0)
+                        self.assertEqual(means["buffered"], 100)
+                        self.assertEqual(means["flexible"], 100)
+                    self.assertTrue(all(strategy in initial_schedules for strategy in run_experiments.STRATEGIES))
+                    for strategy in run_experiments.STRATEGIES:
+                        self.assertTrue(any(solved.get("result_classification") in {"optimal", "feasible_limit"}
+                                            for solved in recoveries[offset:offset + len(run_experiments.SCENARIOS)]))
+                    self.assertTrue(exported.initial_connection_slack.notna().any())
+                    self.assertTrue(exported.recovered_connection_slack.notna().any())
+                    if turnaround == 45:
+                        expected_initial = result.initial_connection_slack.tolist()
+                        self.assertEqual(exported.initial_connection_slack.tolist(), expected_initial)
+        finally:
+            run_experiments.INITIAL_PARAMETERS.clear(); run_experiments.INITIAL_PARAMETERS.update(original_initial)
+            run_experiments.RECOVERY_PARAMETERS.clear(); run_experiments.RECOVERY_PARAMETERS.update(original_recovery)
+
 
 if __name__ == "__main__":
     unittest.main()

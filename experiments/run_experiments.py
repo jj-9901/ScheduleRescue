@@ -148,6 +148,8 @@ def run_experiments(output_path=None):
                    "operated_delayed_flights": None, "cancelled_externally_delayed_flights": None,
                    "externally_imposed_delay_flights": len(scenario["delays"]),
                    "externally_imposed_delay_minutes": sum(scenario["delays"].values()),
+                   "initial_connection_slack_turnaround_minutes": initial_parameters["turnaround_minutes"],
+                   "recovered_connection_slack_turnaround_minutes": recovery_parameters["turnaround_minutes"],
                    "recovery_added_delay_minutes": 0,
                    "total_delay_minutes": sum(scenario["delays"].values()),
                    "total_modeled_recovery_cost": None,
@@ -222,8 +224,8 @@ def run_experiments(output_path=None):
                     "aircraft_reassignment_count": metrics["aircraft_changed_flights"],
                     "crew_reassignment_count": metrics["crew_changed_flights"],
                     "unique_changed_flight_count": metrics["unique_changed_flights"],
-                    "initial_connection_slack": connection_metrics(initial["schedule"], 45)["average_connection_slack_minutes"],
-                    "recovered_connection_slack": connection_metrics(recovered["schedule"], 45)["average_connection_slack_minutes"]})
+                    "initial_connection_slack": connection_metrics(initial["schedule"], initial_parameters["turnaround_minutes"])["average_connection_slack_minutes"],
+                    "recovered_connection_slack": connection_metrics(recovered["schedule"], recovery_parameters["turnaround_minutes"])["average_connection_slack_minutes"]})
                 row["solver_status"] = row["result_classification"]
             else:
                 row["solver_status"] = recovery_classification

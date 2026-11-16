@@ -1,6 +1,6 @@
 # Schedule Rescue
 
-An academic airline schedule planning and disruption recovery simulator. It uses PuLP and CBC to solve a binary mixed-integer linear program for aircraft and crew routing. Schedules shown in the app are solver outputs; an infeasible or non-optimal result is shown as such.
+An academic airline schedule planning and disruption recovery simulator. It uses PuLP and CBC to solve a binary mixed-integer linear program for aircraft and crew routing. Solver status and whether optimality was proven are reported with schedule results.
 
 ## Research question
 
@@ -69,7 +69,7 @@ python experiments/run_experiments.py
 python experiments/analyze_results.py
 ```
 
-The runner saves every one of nine scenarios for all three strategies in `experiments/results/experiment_results.csv`, including failed solves. Recovery uses the same Normal objective, penalties, actual turnaround, and resource disruption rules for every initial strategy. The analysis writes strategy summaries, per-scenario cost differences, failed-solve rows, and interactive HTML charts under `experiments/results/analysis/`. CBC can choose different equal-cost optima across versions or environments; recorded dependency and platform versions support comparison, but exact assignment tie-breaking is not guaranteed.
+The runner saves every one of nine scenarios for all three strategies in `experiments/results/experiment_results.csv`, including failed solves. A pair is optimal only when both solves are proven optimal; it is feasible when both solves have usable schedules but at least one is not proven optimal. Failed pairs remain in reports but are not scored as successful recoveries. Recovery uses the same Normal objective, penalties, configured turnaround, and resource disruption rules for every initial strategy. Slack reporting uses the configured turnaround for each initial or recovery solve. Primary strategy comparisons use common successful scenarios, while individual strategy success/failure counts are reported separately. The analysis writes strategy summaries, per-scenario cost differences, failed-solve rows, and interactive HTML charts under `experiments/results/analysis/`; when no common comparison is available, chart paths show that current outcome instead of stale charts. CBC can choose different equal-cost optima across versions or environments; recorded dependency and platform versions support comparison, but exact assignment tie-breaking is not guaranteed.
 
 The full formulation is in [docs/mathematical_model.md](docs/mathematical_model.md). Data definitions and simplifying assumptions are in [docs/assumptions.md](docs/assumptions.md); instructions are in [docs/user_guide.md](docs/user_guide.md); experiment design is in [docs/methodology.md](docs/methodology.md).
 
