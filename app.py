@@ -22,6 +22,15 @@ def demo_data():
 def csv_download(label, df, filename):
     st.download_button(label,df.to_csv(index=False),filename,mime="text/csv")
 
+def solve_for_app(*args, **kwargs):
+    """Keep construction errors visible as failed solves in the current workflow."""
+    try:
+        return solve_schedule(*args, **kwargs)
+    except Exception as exc:
+        return {"status":"Failed", "result_classification":"failed",
+                "solver_termination_reason":str(exc), "solver_message":str(exc),
+                "schedule":pd.DataFrame(), "components":{}, "objective":None}
+
 def clear_optimization_state():
     for key in ("initial_results","recovery_results","input_snapshot","model_settings","scenario","disrupted_flights","comparison_results"):
         st.session_state.pop(key,None)
@@ -102,7 +111,7 @@ with tabs[2]:
             f,a,c=st.session_state["data"]; results={}
             for strategy in chosen:
                 with st.spinner(f"Solving {strategy} MILP..."):
-                    results[strategy]=solve_schedule(f,a,c,turnaround_minutes=turnaround,strategy=strategy,buffer_minutes=buffer,flexibility_target_minutes=target)
+                    results[strategy]=solve_for_app(f,a,c,turnaround_minutes=turnaround,strategy=strategy,buffer_minutes=buffer,flexibility_target_minutes=target)
                 results[strategy]["solve_context"]={"flights":f.copy(),"aircraft":a.copy(),"crew":c.copy(),
                     "strategy_settings":dict(active_settings),"strategy":strategy}
             st.session_state["initial_results"]=results
@@ -155,7 +164,7 @@ with tabs[3]:
                 oa=dict(zip(base["schedule"].flight_id,base["schedule"].assigned_aircraft))
                 oc={row.flight_id:[x for x in str(row.assigned_crew).split(";") if x] for row in base["schedule"].itertuples()}
                 with st.spinner(f"Recovering {strategy} schedule..."):
-                    recovery[strategy]=solve_schedule(modified,a,c,turnaround_minutes=settings["turnaround"],unavailable_aircraft=unavailable_a,unavailable_crew=unavailable_c,cancelled_flights=cancel_ids,original_assignment=oa,original_crew_assignment=oc,allow_cancellation=True,strategy="normal")
+                    recovery[strategy]=solve_for_app(modified,a,c,turnaround_minutes=settings["turnaround"],unavailable_aircraft=unavailable_a,unavailable_crew=unavailable_c,cancelled_flights=cancel_ids,original_assignment=oa,original_crew_assignment=oc,allow_cancellation=True,strategy="normal")
                 recovery[strategy]["solve_context"]={"flights":modified.copy(),"aircraft":a.copy(),"crew":c.copy(),
                     "initial_strategy":strategy,"initial_settings":dict(settings),"disruptions":dict(current_scenario),
                     "recovery_parameters":dict(recovery[strategy].get("solve_parameters",{}))}
@@ -213,10 +222,14 @@ with tabs[4]:
         else: rows.append({"Strategy":strategy.title(),"solver_status":result.get("result_classification", "failed")})
     if rows:
         table=pd.DataFrame(rows); st.dataframe(table,use_container_width=True); csv_download("Download comparison CSV",table,"strategy_comparison.csv")
-        valid=table[table.solver_status=="optimal"]
+        valid=table[table.solver_status.isin(["optimal", "feasible_limit"])].copy()
         if not valid.empty:
+            valid["Solution status"]=valid.solver_status.map({"optimal":"Proven optimal", "feasible_limit":"Feasible; optimality not proven"})
+            if valid.solver_status.eq("feasible_limit").any():
+                st.warning("Comparison includes feasible schedules whose optimality was not proven. Chart legends identify these results.")
             for metric,title in [("initial_operating_cost","Initial operating cost"),("recovery_operating_cost","Recovered operating cost"),("total_modeled_recovery_cost","Total modeled recovery cost"),("cancelled_flights","Cancelled flights"),("operated_externally_delayed_flights","Operated externally delayed flights"),("aircraft_changed_flights","Aircraft assignment changes"),("crew_changed_flights","Crew assignment changes"),("unique_changed_flights","Unique flights changed")]:
-                st.plotly_chart(px.bar(valid,x="Strategy",y=metric,title=title),use_container_width=True)
+                st.plotly_chart(px.bar(valid,x="Strategy",y=metric,color="Solution status",title=title,
+                    color_discrete_map={"Proven optimal":"#2563eb", "Feasible; optimality not proven":"#d97706"}),use_container_width=True)
             st.caption("Total modeled recovery cost = recovered operating cost + cancellation, aircraft change, crew change, and other recovery penalties. Strategy preference scores are separate. Initial cost is shown for comparison only.")
     else: st.info("Run recovery on one or more schedules to compare actual solver results.")
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import math
 import tempfile
 import warnings
 import time
@@ -85,8 +86,23 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
     strategy = str(strategy).lower().strip()
     if strategy not in {"normal", "buffered", "flexible"}:
         raise ValueError("Strategy must be normal, buffered, or flexible.")
-    if turnaround_minutes < 0 or crew_rest_minutes < 0 or buffer_minutes < 0:
-        raise ValueError("Turnaround, rest, and buffer values cannot be negative.")
+    parameters = {
+        "turnaround_minutes": turnaround_minutes, "crew_rest_minutes": crew_rest_minutes,
+        "buffer_minutes": buffer_minutes, "flexibility_target_minutes": flexibility_target_minutes,
+        "flexibility_penalty_per_minute": flexibility_penalty_per_minute,
+        "cancellation_penalty": cancellation_penalty,
+        "aircraft_change_penalty": aircraft_change_penalty, "crew_change_penalty": crew_change_penalty,
+    }
+    if time_limit is not None:
+        parameters["time_limit"] = time_limit
+    for name, value in parameters.items():
+        try:
+            valid = math.isfinite(value) and (value > 0 if name == "time_limit" else value >= 0)
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            requirement = "positive" if name == "time_limit" else "nonnegative"
+            raise ValueError(f"{name} must be a finite {requirement} number.")
     cancelled_flights = set(cancelled_flights or [])
     unavailable_aircraft, unavailable_crew = set(unavailable_aircraft or []), set(unavailable_crew or [])
     original_assignment = dict(original_assignment or {})

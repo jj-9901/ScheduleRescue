@@ -20,6 +20,24 @@ def _required(df: pd.DataFrame, cols: list[str], label: str) -> None:
         raise ValueError(f"{label} has missing values in: {', '.join(bad)}")
 
 
+def _timestamps(df, columns, key, label):
+    for column in columns:
+        parsed = pd.to_datetime(df[column], errors="coerce")
+        invalid = parsed.isna()
+        if invalid.any():
+            ids = df.loc[invalid, key].tolist()
+            raise ValueError(f"{label} column {column} must contain valid timestamps; invalid IDs: {ids}")
+        df[column] = parsed
+
+
+def _finite(df, columns, key, label):
+    for column in columns:
+        valid = df[column].map(lambda value: pd.notna(value) and math.isfinite(float(value)))
+        if not valid.all():
+            ids = df.loc[~valid, key].tolist()
+            raise ValueError(f"{label} column {column} must contain finite numbers; invalid IDs: {ids}")
+
+
 def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFrame | None = None):
     """Return normalized copies, rejecting malformed or incompatible records."""
     f, a = flights.copy(), aircraft.copy()
@@ -41,9 +59,8 @@ def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFra
         if df[key].duplicated().any():
             duplicates = df.loc[df[key].duplicated(False), key].tolist()
             raise ValueError(f"{label} IDs must be unique; duplicates: {duplicates}")
-    f["departure"] = pd.to_datetime(f["departure"], errors="raise")
-    f["arrival"] = pd.to_datetime(f["arrival"], errors="raise")
-    a["available_from"] = pd.to_datetime(a["available_from"], errors="raise")
+    _timestamps(f, ["departure", "arrival"], "flight_id", "Flights")
+    _timestamps(a, ["available_from"], "aircraft_id", "Aircraft")
     if "aircraft_type_required" not in f: f["aircraft_type_required"] = "ANY"
     if "required_crew_count" not in f: f["required_crew_count"] = 1
     if "priority" not in f: f["priority"] = 1
@@ -67,6 +84,8 @@ def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFra
     f["priority"] = pd.to_numeric(f["priority"], errors="raise").fillna(1).astype(float)
     a["aircraft_type"] = a["aircraft_type"].fillna("ANY").astype(str).str.strip().str.upper()
     a["cost_per_hour"] = pd.to_numeric(a["cost_per_hour"], errors="raise")
+    _finite(f, ["priority"], "flight_id", "Flights")
+    _finite(a, ["cost_per_hour"], "aircraft_id", "Aircraft")
     if (f["arrival"] <= f["departure"]).any():
         raise ValueError("Every flight arrival must be later than departure.")
     if (f["required_crew_count"] < 1).any() or (f["priority"] <= 0).any():
@@ -82,9 +101,10 @@ def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFra
         _required(c, CREW_COLUMNS, "Crew")
         c["crew_id"] = c["crew_id"].astype(str).str.strip()
         c["initial_location"] = c["initial_location"].astype(str).str.strip().str.upper()
-        c["available_from"] = pd.to_datetime(c["available_from"], errors="raise")
+        _timestamps(c, ["available_from"], "crew_id", "Crew")
         c["max_work_hours"] = pd.to_numeric(c["max_work_hours"], errors="raise")
         c["cost_per_hour"] = pd.to_numeric(c["cost_per_hour"], errors="raise")
+        _finite(c, ["max_work_hours", "cost_per_hour"], "crew_id", "Crew")
         c["eligible_aircraft_types"] = c["eligible_aircraft_types"].fillna("").astype(str).str.upper()
         if c["crew_id"].duplicated().any():
             raise ValueError("Crew IDs must be unique.")
