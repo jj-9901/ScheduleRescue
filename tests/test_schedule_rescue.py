@@ -185,12 +185,42 @@ class ScheduleModelTests(unittest.TestCase):
     def test_experiment_runner_uses_all_strategies_for_same_scenarios(self):
         from experiments.run_experiments import SCENARIOS, STRATEGIES, run_experiments
         with TemporaryDirectory() as tmp:
-            result,path=run_experiments(Path(tmp)/"out.csv")
-            self.assertEqual(len(result),len(SCENARIOS)*len(STRATEGIES))
+            result,path=run_experiments(Path(tmp)/"out.csv",tie_break_seeds=(0,1))
+            self.assertEqual(len(result),len(SCENARIOS)*len(STRATEGIES)*2)
             self.assertEqual(set(result.strategy),set(STRATEGIES))
-            for scenario_id,group in result.groupby("scenario_id"):
-                self.assertEqual(set(group.strategy),set(STRATEGIES),scenario_id)
+            for key,group in result.groupby(["scenario_id","tie_break_seed"]):
+                self.assertEqual(set(group.strategy),set(STRATEGIES),key)
             self.assertTrue(Path(path).exists())
+
+    def test_input_row_order_does_not_change_schedules(self):
+        root=Path(__file__).resolve().parents[1]/"data"
+        f,a,c=[pd.read_csv(root/f"demo_{name}.csv") for name in ("flights","aircraft","crew")]
+        for strategy in ("normal","buffered","flexible"):
+            base=solve_schedule(f,a,c,strategy=strategy)["schedule"].set_index("flight_id").sort_index()
+            for state in (1,2,3):
+                shuffled=[x.sample(frac=1,random_state=state).reset_index(drop=True) for x in (f,a,c)]
+                other=solve_schedule(*shuffled,strategy=strategy)["schedule"].set_index("flight_id").sort_index()
+                self.assertTrue(base[["assigned_aircraft","assigned_crew"]].equals(other[["assigned_aircraft","assigned_crew"]]),(strategy,state))
+
+    def test_tie_break_keeps_primary_optimum(self):
+        root=Path(__file__).resolve().parents[1]/"data"
+        f,a,c=[pd.read_csv(root/f"demo_{name}.csv") for name in ("flights","aircraft","crew")]
+        for strategy in ("normal","buffered","flexible"):
+            plain=solve_schedule(f,a,c,strategy=strategy,tie_break=False)
+            for seed in (0,1,2):
+                broken=solve_schedule(f,a,c,strategy=strategy,tie_break_seed=seed)
+                self.assertEqual(broken["tie_break_status"],"optimal")
+                self.assertAlmostEqual(broken["objective"],plain["objective"],places=4)
+                self.assertEqual(broken["solve_parameters"]["tie_break_seed"],seed)
+        self.assertEqual(plain["tie_break_status"],"not_run")
+
+    def test_identical_aircraft_plans_receive_identical_crew_plans(self):
+        root=Path(__file__).resolve().parents[1]/"data"
+        f,a,c=[pd.read_csv(root/f"demo_{name}.csv") for name in ("flights","aircraft","crew")]
+        buffered=solve_schedule(f,a,c,strategy="buffered")["schedule"]
+        flexible=solve_schedule(f,a,c,strategy="flexible")["schedule"]
+        self.assertEqual(buffered.assigned_aircraft.tolist(),flexible.assigned_aircraft.tolist())
+        self.assertEqual(buffered.assigned_crew.tolist(),flexible.assigned_crew.tolist())
 
     def test_solver_result_classification_uses_solution_status(self):
         class Model:

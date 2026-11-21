@@ -17,3 +17,4 @@
 - Schedule coverage counts operated, cancelled, and unexpectedly uncovered flights. Solver failures do not produce valid schedule metrics.
 - Penalties are illustrative and depend on user cost units; changing weights can change assignments. Do not interpret them as industry-calibrated values.
 - Airport closures and window-specific restrictions have a solver API representation for resources, but no airport closure UI is provided.
+- Among schedules with equal optimal objective value, the reported schedule is chosen by a deterministic ID-based tie-break. Experiments repeat each scenario under ten tie-break seeds; metrics that vary across seeds reflect the choice among equal-cost optima rather than the strategy.

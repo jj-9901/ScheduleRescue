@@ -127,4 +127,9 @@ def prepare_data(flights: pd.DataFrame, aircraft: pd.DataFrame, crew: pd.DataFra
                 eligible = c["eligible_aircraft_types"].str.split(";").map(lambda xs: req in [x.strip() for x in xs] or "ANY" in [x.strip() for x in xs])
                 if int(eligible.sum()) < count:
                     raise ValueError(f"Not enough crew qualified for aircraft type {req!r} (required {count}).")
-    return f.sort_values(["departure", "arrival"]).reset_index(drop=True), a.reset_index(drop=True), c.reset_index(drop=True)
+    # Canonical ordering makes the model independent of input row order.
+    f = f.sort_values(["departure", "arrival", "flight_id"], kind="mergesort").reset_index(drop=True)
+    a = a.sort_values("aircraft_id", kind="mergesort").reset_index(drop=True)
+    if not c.empty:
+        c = c.sort_values("crew_id", kind="mergesort")
+    return f, a, c.reset_index(drop=True)

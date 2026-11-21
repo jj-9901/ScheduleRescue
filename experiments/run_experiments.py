@@ -30,6 +30,10 @@ SCENARIOS = (
     {"scenario_id": "S08_F001_30m_A002", "delays": {"F001": 30}, "cancel": [], "aircraft": ["A002"], "crew": []},
     {"scenario_id": "S09_A002_C001", "delays": {}, "cancel": [], "aircraft": ["A002"], "crew": ["C001"]},
 )
+# Equal-cost optima are common (for example, crew with identical hourly rates).
+# Each seed fixes a different deterministic tie-break among them; all strategies
+# share the same seed within a replicate so they are compared on equal terms.
+TIE_BREAK_SEEDS = tuple(range(10))
 INITIAL_PARAMETERS = {"turnaround_minutes": 45, "crew_rest_minutes": 30,
                      "buffer_minutes": 30, "flexibility_target_minutes": 90,
                      "flexibility_penalty_per_minute": 5}
@@ -77,6 +81,7 @@ def _versions():
     cbc = pulp.PULP_CBC_CMD().available()
     try:
         cbc_version = subprocess.run([cbc, "-version"], capture_output=True, text=True,
+                                      stdin=subprocess.DEVNULL,
                                       timeout=3, check=False).stdout.strip().splitlines()[:2]
     except (OSError, subprocess.TimeoutExpired):
         cbc_version = ["unavailable"]
@@ -95,7 +100,7 @@ def _apply_delays(flights, delays):
     return modified
 
 
-def run_experiments(output_path=None):
+def run_experiments(output_path=None, tie_break_seeds=None):
     initial_parameters = _validated_parameters(INITIAL_PARAMETERS,
         {"turnaround_minutes", "crew_rest_minutes", "buffer_minutes", "flexibility_target_minutes", "flexibility_penalty_per_minute"}, "initial")
     recovery_parameters = _validated_parameters(RECOVERY_PARAMETERS,
@@ -110,18 +115,21 @@ def run_experiments(output_path=None):
     if unknown:
         raise ValueError(f"Experiment scenarios reference missing demo IDs: {sorted(unknown)}")
     rows = []
+    dependency_versions = json.dumps(_versions(), sort_keys=True)
     operating_cost_weights = {
         "aircraft": dict(zip(aircraft.aircraft_id, aircraft.cost_per_hour)),
         "crew": dict(zip(crew.crew_id, crew.cost_per_hour)),
     }
-    for strategy in STRATEGIES:
+    seeds = tuple(TIE_BREAK_SEEDS if tie_break_seeds is None else tie_break_seeds)
+    for seed, strategy in ((seed, strategy) for seed in seeds for strategy in STRATEGIES):
         try:
             initial = solve_schedule(flights, aircraft, crew, strategy=strategy,
-                                     **initial_parameters)
+                                     tie_break_seed=seed, **initial_parameters)
         except Exception as exc:
             initial = {"status": "Error", "result_classification": "failed", "solver_message": str(exc), "solver_termination_reason": str(exc), "schedule": pd.DataFrame(), "components": {}}
         for scenario in SCENARIOS:
             row = {"scenario_id": scenario["scenario_id"], "strategy": strategy,
+                   "tie_break_seed": seed,
                    "scenario_parameters": json.dumps(scenario, sort_keys=True),
                    "initial_parameters": json.dumps({**initial_parameters, "strategy": strategy}, sort_keys=True),
                    "recovery_parameters": json.dumps(recovery_parameters, sort_keys=True),
@@ -129,7 +137,7 @@ def run_experiments(output_path=None):
                        **initial_parameters, "strategy": strategy, "operating_cost_weights": operating_cost_weights,
                        "time_limit": 30}), sort_keys=True),
                    "recovery_solve_parameters": "",
-                   "dependency_versions": json.dumps(_versions(), sort_keys=True),
+                   "dependency_versions": dependency_versions,
                    "initial_solver_status": initial.get("status", "Unknown"),
                    "initial_result_classification": initial.get("result_classification", "failed"),
                    "initial_solver_termination_reason": initial.get("solver_termination_reason", ""),
@@ -183,7 +191,8 @@ def run_experiments(output_path=None):
                     strategy=recovery_parameters["recovery_strategy"],
                     cancellation_penalty=recovery_parameters["cancellation_penalty"],
                     aircraft_change_penalty=recovery_parameters["aircraft_change_penalty"],
-                    crew_change_penalty=recovery_parameters["crew_change_penalty"])
+                    crew_change_penalty=recovery_parameters["crew_change_penalty"],
+                    tie_break_seed=seed)
                 row["recovery_solve_parameters"] = json.dumps(recovery_call_parameters, sort_keys=True)
                 recovered = solve_schedule(disrupted, aircraft, crew, **recovery_call_parameters)
                 row["recovery_solve_parameters"] = json.dumps(recovered.get("solve_parameters", {

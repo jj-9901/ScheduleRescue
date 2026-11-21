@@ -1,0 +1,10 @@
+scenario_id,buffered,flexible,normal
+S01_none,0,0,10
+S02_F001_30m,10,10,0
+S03_F001_60m,5,5,5
+S04_F001_120m,5,5,5
+S05_F003_cancel,0,0,10
+S06_A002_unavailable,10,10,0
+S07_C001_unavailable,0,0,10
+S08_F001_30m_A002,10,10,0
+S09_A002_C001,10,10,0

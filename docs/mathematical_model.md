@@ -58,6 +58,10 @@ Recovery minimizes:
 
 The implementation defaults are `P_cancel=100000`, `P_A=250`, and `P_C=100` in the dataset's cost units. They are exposed in source-level function parameters, not in the interface. Reported components stay separate. Cancellation priorities scale the cancellation term.
 
+## Lexicographic tie-break
+
+After the objective above is solved to value `Z*`, a second solve adds `objective ≤ Z* + 10^-6 max(1,|Z*|)` and minimizes `Σ_(i,a) w_ia x_ia + Σ_(i,c) w_ic y_ic`. The weights `w ∈ [1,2)` are a fixed hash of the tie-break seed and the IDs, so the selected optimum does not depend on input row order. If the second stage fails, the stage-one schedule is kept and the status is recorded.
+
 ## Disruption representation
 
 - An external delay shifts both fixed times `s_i,t_i` before the recovery MILP is built. It is not applied in-place to session source data.

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import re
 import math
+import hashlib
 import tempfile
 import warnings
+import os
 import time
 import pandas as pd
 import pulp
@@ -53,6 +55,41 @@ def _schedule_passes_coverage(schedule, flight_ids, flight_data):
     return True
 
 
+def _tie_break_weight(*keys):
+    """Deterministic weight in [1, 2) that depends only on record IDs.
+
+    It is used only to choose among assignments whose primary objective value
+    is already optimal, so input row order cannot change the selected plan.
+    """
+    digest = hashlib.sha256("|".join(map(str, keys)).encode("utf-8")).digest()
+    return 1.0 + int.from_bytes(digest[:8], "big") / 2**64
+
+
+def _run_cbc(model, time_limit):
+    """Solve with CBC and return classification, log text, error and runtime."""
+    log_file = tempfile.NamedTemporaryFile(prefix="schedule-rescue-cbc-", suffix=".log", delete=False)
+    log_path = log_file.name
+    log_file.close()
+    solver = pulp.PULP_CBC_CMD(msg=True, timeLimit=time_limit, logPath=log_path)
+    started = time.perf_counter()
+    error = None
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="`logPath` argument replaces `msg=1`.*")
+            model.solve(solver)
+        with open(log_path, encoding="utf-8", errors="replace") as stream:
+            log_text = stream.read()
+    except Exception as exc:
+        error = str(exc)
+        log_text = ""
+    finally:
+        try: os.unlink(log_path)
+        except OSError: pass
+    runtime = time.perf_counter() - started
+    classification = "failed" if error else _classify_solver_result(model)
+    return classification, log_text, error, runtime
+
+
 def _compatible_type(required, provided):
     return required == "ANY" or provided == "ANY" or required == provided
 
@@ -76,11 +113,20 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
                    cancellation_penalty=CANCEL_PENALTY,
                    aircraft_change_penalty=AIRCRAFT_CHANGE_PENALTY,
                    crew_change_penalty=CREW_CHANGE_PENALTY,
-                   time_limit=30):
+                   time_limit=30, tie_break=True, tie_break_seed=0):
     """Solve a time-space route assignment MILP.
 
     Crew duty is approximated by total block time (sum of flight durations).
     Fixed flight times mean no recovery-added delay variable is present.
+
+    When ``tie_break`` is true, a second lexicographic solve keeps the primary
+    objective at its optimal value and selects, among equally good schedules,
+    the one with the smallest ID-based tie-break score. ``tie_break_seed``
+    selects a different but equally deterministic tie-break rule, which lets
+    experiments measure how much results depend on the choice among equal-cost
+    optima. Without the second stage, CBC chooses
+    arbitrarily among equal-cost crew/aircraft assignments and that choice can
+    change with input row order.
     """
     f, a, c = prepare_data(flights, aircraft, crew)
     strategy = str(strategy).lower().strip()
@@ -218,38 +264,36 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
         for (i,k,j),v in arcs.items():
             slack = (fd[k]["departure"]-fd[i]["arrival"]).total_seconds()/60 - turnaround_minutes
             tight_penalty += max(0, flexibility_target_minutes-slack)*flexibility_penalty_per_minute*v
-    m += op_cost + crew_cost + cancel_cost + aircraft_change + crew_change + tight_penalty
-    log_file = tempfile.NamedTemporaryFile(prefix="schedule-rescue-cbc-", suffix=".log", delete=False)
-    log_path = log_file.name
-    log_file.close()
-    solver = pulp.PULP_CBC_CMD(msg=True, timeLimit=time_limit, logPath=log_path)
-    solve_started = time.perf_counter()
-    solve_error = None
-    try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="`logPath` argument replaces `msg=1`.*")
-            m.solve(solver)
-        with open(log_path, encoding="utf-8", errors="replace") as stream:
-            log_text = stream.read()
-    except Exception as exc:
-        solve_error = str(exc)
-        log_text = ""
-    finally:
-        import os
-        try: os.unlink(log_path)
-        except OSError: pass
-    solver_runtime = time.perf_counter() - solve_started
-    classification = _classify_solver_result(m)
+    primary = op_cost + crew_cost + cancel_cost + aircraft_change + crew_change + tight_penalty
+    m += primary
+    classification, log_text, solve_error, solver_runtime = _run_cbc(m, time_limit)
     termination_reason, best_bound, optimality_gap = _cbc_metadata(log_text)
     status = {"optimal":"Optimal", "feasible_limit":"FeasibleLimit", "infeasible":"Infeasible", "failed":"Failed"}[classification]
     metadata = {"result_classification":classification,"solver_termination_reason":termination_reason,
                 "best_bound":best_bound,"optimality_gap":optimality_gap,
                 "pulp_status":pulp.LpStatus.get(m.status,"Unknown"),
-                "pulp_solution_status":pulp.LpSolution.get(m.sol_status,"Unknown")}
+                "pulp_solution_status":pulp.LpSolution.get(m.sol_status,"Unknown"),
+                "tie_break_status":"not_run"}
     if solve_error:
         metadata["solver_termination_reason"] = solve_error
-        metadata["result_classification"] = classification = "failed"
-        status = "Failed"
+    if classification in {"optimal", "feasible_limit"} and tie_break:
+        # Lexicographic second stage: keep the primary objective at the value
+        # just found and minimize a deterministic ID-based preference score.
+        stage_one = {v.name: v.varValue for v in m.variables()}
+        primary_value = float(pulp.value(primary) or 0)
+        tie_score = pulp.lpSum(_tie_break_weight(tie_break_seed, "aircraft", i, j)*x[i,j] for i in F for j in A)
+        tie_score += pulp.lpSum(_tie_break_weight(tie_break_seed, "crew", i, j)*y[i,j] for i in F for j in C)
+        m += primary <= primary_value + 1e-6*max(1.0, abs(primary_value)), "lexicographic_primary_bound"
+        m.setObjective(tie_score)
+        tie_class, _, tie_error, tie_runtime = _run_cbc(m, time_limit)
+        solver_runtime += tie_runtime
+        if tie_error is None and tie_class in {"optimal", "feasible_limit"}:
+            metadata["tie_break_status"] = tie_class
+        else:
+            for v in m.variables():
+                if v.name in stage_one: v.varValue = stage_one[v.name]
+            metadata["tie_break_status"] = f"{tie_class}; stage-one schedule kept"
+        m.setObjective(primary)
     if classification not in {"optimal", "feasible_limit"}:
         return {"status": status, **metadata, "schedule": pd.DataFrame(), "objective": None,
                 "strategy": strategy, "effective_turnaround": op_turn, "components": {}, "solver_message": status,
@@ -275,7 +319,7 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
                 "solver_message":"Solver result did not cover every input flight.",
                 "solver_runtime_seconds":solver_runtime}
     strategy_score = values["flexibility_penalty"] if strategy == "flexible" else 0.0
-    return {"status":status,**metadata,"schedule":schedule,"objective":float(pulp.value(m.objective)),"strategy":strategy,"effective_turnaround":op_turn,"components":values,"strategy_score":strategy_score,"solver_message":termination_reason,"solver_runtime_seconds":solver_runtime,
+    return {"status":status,**metadata,"schedule":schedule,"objective":float(pulp.value(primary)),"strategy":strategy,"effective_turnaround":op_turn,"components":values,"strategy_score":strategy_score,"solver_message":termination_reason,"solver_runtime_seconds":solver_runtime,
             "solve_parameters":{"turnaround_minutes":turnaround_minutes,"crew_rest_minutes":crew_rest_minutes,
                 "strategy":strategy,"buffer_minutes":buffer_minutes,"flexibility_target_minutes":flexibility_target_minutes,
                 "flexibility_penalty_per_minute":flexibility_penalty_per_minute,"cancellation_penalty":cancellation_penalty,
@@ -283,6 +327,6 @@ def solve_schedule(flights, aircraft, crew=None, turnaround_minutes=45,
                 "unavailable_aircraft":sorted(unavailable_aircraft),"unavailable_crew":sorted(unavailable_crew),
                 "unavailable_periods":periods,"cancelled_flights":sorted(cancelled_flights),
                 "original_assignment":original_assignment,"original_crew_assignment":original_crew_assignment,
-                "allow_cancellation":allow_cancellation,"time_limit":time_limit,
+                "allow_cancellation":allow_cancellation,"time_limit":time_limit,"tie_break":tie_break,"tie_break_seed":tie_break_seed,
                 "operating_cost_weights":{"aircraft":dict(zip(a.aircraft_id, a.cost_per_hour)),
                     "crew":dict(zip(c.crew_id, c.cost_per_hour))}}}

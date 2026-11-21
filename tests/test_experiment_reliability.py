@@ -53,7 +53,7 @@ class ExperimentPairTests(unittest.TestCase):
                 return {"status": "Infeasible", "result_classification": "infeasible", "schedule": pd.DataFrame(), "solver_message": "controlled infeasible", "solver_termination_reason": "controlled infeasible"}
             return recovery_good
         with tempfile.TemporaryDirectory() as tmp, patch.object(run_experiments, "SCENARIOS", fake_scenarios), patch.object(run_experiments, "solve_schedule", side_effect=mocked):
-            result, _ = run_experiments.run_experiments(Path(tmp) / "out.csv")
+            result, _ = run_experiments.run_experiments(Path(tmp) / "out.csv", tie_break_seeds=(0,))
             stored = pd.read_csv(Path(tmp) / "out.csv")
         self.assertEqual(len(result), 6)
         self.assertTrue((result.pair_outcome == "optimal_pair").any())
@@ -67,7 +67,7 @@ class ExperimentPairTests(unittest.TestCase):
                   "schedule": pd.DataFrame(), "components": {}}
         with tempfile.TemporaryDirectory() as tmp, patch.object(run_experiments, "solve_schedule", return_value=failed):
             frame, _ = run_experiments.run_experiments(Path(tmp) / "out.csv")
-        self.assertEqual(len(frame), len(run_experiments.SCENARIOS) * len(run_experiments.STRATEGIES))
+        self.assertEqual(len(frame), len(run_experiments.SCENARIOS) * len(run_experiments.STRATEGIES) * len(run_experiments.TIE_BREAK_SEEDS))
         self.assertTrue((frame.pair_outcome == "failed_pair").all())
         self.assertTrue((frame.recovery_result_classification == "not_run_initial").all())
         self.assertTrue(frame.recovery_error.str.contains("not attempted").all())
@@ -79,10 +79,12 @@ class ExperimentPairTests(unittest.TestCase):
             captured.append(dict(kwargs))
             return real(*args, **kwargs)
         with tempfile.TemporaryDirectory() as tmp, patch.object(run_experiments, "solve_schedule", side_effect=record):
-            frame, _ = run_experiments.run_experiments(Path(tmp) / "out.csv")
+            frame, _ = run_experiments.run_experiments(Path(tmp) / "out.csv", tie_break_seeds=(0, 3))
         self.assertTrue(captured)
+        self.assertEqual(set(frame.tie_break_seed), {0, 3})
         for kw in captured:
             self.assertIn("crew_rest_minutes", kw)
+            self.assertIn(kw["tie_break_seed"], {0, 3})
             if kw.get("original_assignment"):
                 self.assertEqual(kw["aircraft_change_penalty"], run_experiments.RECOVERY_PARAMETERS["aircraft_change_penalty"])
                 self.assertEqual(kw["crew_change_penalty"], run_experiments.RECOVERY_PARAMETERS["crew_change_penalty"])
@@ -208,6 +210,33 @@ class ExperimentAnalysisTests(unittest.TestCase):
             self.assertIn("Latest analysis", (output / "cancellations.html").read_text(encoding="utf-8"))
 
 
+class TieBreakReplicateAnalysisTests(unittest.TestCase):
+    def test_cases_are_scenario_and_seed_and_spread_is_reported(self):
+        rows = []
+        for seed in (0, 1):
+            for strategy in ("normal", "buffered", "flexible"):
+                cost = {"normal": 10, "buffered": 20, "flexible": 30}[strategy] if seed == 0 else {"normal": 30, "buffered": 20, "flexible": 10}[strategy]
+                rows.append({"scenario_id": "s1", "strategy": strategy, "tie_break_seed": seed,
+                    "initial_result_classification": "optimal", "recovery_result_classification": "optimal",
+                    "pair_outcome": "optimal_pair", "pair_failure_reason": "", "initial_operating_cost": 1,
+                    "recovered_operating_cost": cost, "recovery_penalties": 0, "total_modeled_recovery_cost": cost,
+                    "crew_reassignment_count": cost / 10})
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "input.csv"; pd.DataFrame(rows).to_csv(source, index=False)
+            summary, differences = analyze_results.analyze(source)
+            output = source.parent / "analysis"
+            self.assertEqual(set(summary.common_case_count), {2})
+            self.assertEqual(set(summary.common_scenario_count), {1})
+            self.assertEqual(set(differences.index), {"s1|seed=0", "s1|seed=1"})
+            spread = pd.read_csv(output / "tie_break_spread_by_strategy.csv").set_index("strategy")
+            self.assertEqual(spread.loc["normal", "total_modeled_recovery_cost_min"], 10)
+            self.assertEqual(spread.loc["normal", "total_modeled_recovery_cost_max"], 30)
+            counts = pd.read_csv(output / "lowest_total_cost_counts.csv").set_index("scenario_id")
+            self.assertEqual(int(counts.loc["s1", "normal"]), 1)
+            self.assertEqual(int(counts.loc["s1", "flexible"]), 1)
+            self.assertIn("normal 1/2", (output / "interpretation.md").read_text())
+
+
 class ExperimentSlackTests(unittest.TestCase):
     def test_exported_slack_uses_each_solve_turnaround(self):
         original_initial = dict(run_experiments.INITIAL_PARAMETERS)
@@ -224,7 +253,7 @@ class ExperimentSlackTests(unittest.TestCase):
                         captured.append((dict(kwargs), solved))
                         return solved
                     with patch.object(run_experiments, "solve_schedule", side_effect=record):
-                        result, path = run_experiments.run_experiments(Path(tmp) / "metrics.csv")
+                        result, path = run_experiments.run_experiments(Path(tmp) / "metrics.csv", tie_break_seeds=(0,))
                     exported = pd.read_csv(path)
                     successful = result[result.pair_outcome.isin(["optimal_pair", "feasible_pair"])]
                     exported_success = exported[exported.pair_outcome.isin(["optimal_pair", "feasible_pair"])]
